@@ -4,7 +4,15 @@ source = "/srv/qsx-input/PROJECT"
 state_dir = "/var/lib/qsx/MathResearch"
 disk = "/var/lib/qsx/MathResearch/disks/private.qcow2"
 disk_gib = 60
+workspace = "/home/agent/workspace/FT1536_IDEAL_SOURCE_BASELINE_V1"
 network_profile = "offline"
+
+[base_image]
+# Fetch only during controlled setup and verify against the publisher's SHA256SUMS.
+source = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+release = "Ubuntu 24.04 LTS amd64 server cloud image (operator-pinned build)"
+path = "/var/lib/qsx/images/ubuntu-24.04-pinned.qcow2"
+sha256 = "REPLACE_WITH_64_LOWERCASE_HEX_FROM_OFFICIAL_SHA256SUMS"
 [git]
 branch_prefix = "agent/mathresearch"
 source_read_only = true

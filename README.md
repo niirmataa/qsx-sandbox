@@ -1,21 +1,32 @@
 # QSX MVP
 
-QSX is a conservative Python 3.12 controller for one `MathResearch` workspace and a future Ubuntu 24.04 libvirt/QEMU/KVM VM. The cloud build validates project-state logic and **offline** QCOW2 operations; it does not claim host or network isolation.
+QSX is a conservative Python 3.12 controller for one `MathResearch` Ubuntu 24.04 libvirt/QEMU/KVM VM. Cloud validation covers Git, offline images, provisioning media, schemas, wheel installation, and adapter contracts—not KVM boot or network isolation.
 
-## Setup and use
+## Reproducible developer setup
+
+`requirements-dev.lock` pins the complete CPython 3.12/Linux x86_64 developer dependency set with wheel hashes. `codex/setup.sh` installs it with `--require-hashes`. Runtime is standard-library only and the repository includes a dependency-free PEP 517 wheel backend.
+The lock was reproduced in a fresh venv with downloaded setup-phase wheels, `--no-index --require-hashes`, and `pip check`; wheel acceptance itself also runs without network access.
 
 ```bash
 QSX_BUILD_CONTEXT=codex-cloud codex/setup.sh
-.venv/bin/pip install --no-deps -e .
-qsx --help
+make test-cloud lint typecheck security-audit install-wheel
+```
+
+## Operator flow
+
+Copy `config/qsx.example.toml`, replace the base-image checksum with the checksum from the official Ubuntu release manifest, and point `base_image.path` at the locally staged image. QSX never downloads an image at runtime.
+
+```bash
 qsx doctor > doctor.json
-cp config/qsx.example.toml qsx.toml  # edit source/state/disk
-qsx --config qsx.toml create task-001
-qsx --config qsx.toml resume task-001
-qsx --config qsx.toml checkpoint task-001  # domain must be SHUTOFF
+qsx --config qsx.toml create task-001    # import, independent disk, ISO, define
+qsx --config qsx.toml start              # KVM only; first boot imports then powers off
+qsx --config qsx.toml status
+qsx --config qsx.toml finalize-import task-001
+qsx --config qsx.toml start              # agent works only in guest workspace
+qsx --config qsx.toml shutdown
+qsx --config qsx.toml checkpoint task-001
+qsx --config qsx.toml rollback CHECKPOINT_ID
 qsx --config qsx.toml export task-001 /new/review-destination
 ```
 
-`create` copies into private state, creates a technical import baseline, and switches to `agent/mathresearch/<task-id>`. Existing tasks retain their run ID and branch. Source history is transported through a bundle, never a shared clone. The source is checked before/after copying. External symlinks and incomplete Git modes are refused. Normal export creates a fresh directory containing Git history, baseline diff, and task metadata; it never writes the input.
-
-The CLI has no Docker, credentials, push, merge, writable source mount, or arbitrary-shell facility. `offline` and `openai` are configuration intentions until the host acceptance proves external enforcement. Run `make test-cloud`, `make lint`, and `make typecheck`.
+Export and checkpoint inspect the stopped guest via read-only libguestfs. Export creates a fresh directory containing Git history, baseline diff, and task metadata. There is no Docker dependency, writable source mount, credential provisioning, push, merge, or arbitrary host-shell API.

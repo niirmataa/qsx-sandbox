@@ -160,23 +160,26 @@ def import_project(config: Config, task_id: str) -> dict[str, object]:
         raise
 
 
-def export_project(config: Config, task_id: str, destination: Path) -> None:
+def export_project(
+    config: Config, task_id: str, destination: Path, workspace: Path | None = None
+) -> None:
     validate_task(task_id)
     if destination.exists() or destination.resolve().is_relative_to(config.source):
         raise QSXError("export destination must be new and outside the source")
     root = config.state_dir / "tasks" / task_id
     data = json.loads((root / "task.json").read_text())
+    workspace = workspace or root / "workspace"
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     try:
         shutil.copytree(
-            root / "workspace",
+            workspace,
             temporary,
             symlinks=True,
             ignore=shutil.ignore_patterns(".ssh", ".gnupg", ".aws", ".codex"),
         )
         (temporary / ".qsx-export").mkdir(mode=0o700)
         atomic_json(temporary / ".qsx-export/task.json", data)
-        diff = _git(root / "workspace", "diff", f"{data['baseline_commit']}..{data['branch']}")
+        diff = _git(workspace, "diff", f"{data['baseline_commit']}..{data['branch']}")
         (temporary / ".qsx-export/baseline.diff").write_text(diff)
         os.replace(temporary, destination)
     except BaseException:

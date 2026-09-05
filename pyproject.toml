@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools==75.8.0"]
-build-backend = "setuptools.build_meta"
+requires = []
+build-backend = "qsx_build"
+backend-path = ["build_backend"]
 
 [project]
 name = "qsx"
@@ -11,9 +12,6 @@ dependencies = []
 
 [project.scripts]
 qsx = "qsx.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

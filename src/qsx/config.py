@@ -20,6 +20,11 @@ class Config:
     disk_gib: int = 60
     network_profile: str = "offline"
     branch_prefix: str = "agent/mathresearch"
+    guest_workspace: str = "/home/agent/workspace/PROJECT"
+    base_image: Path | None = None
+    base_image_sha256: str | None = None
+    base_image_source: str | None = None
+    base_image_release: str | None = None
 
 
 def load(path: Path) -> Config:
@@ -35,8 +40,13 @@ def load(path: Path) -> Config:
     disk = Path(data["disk"]).expanduser().resolve()
     if not source.is_absolute() or source == Path("/") or state == Path("/"):
         raise QSXError("source/state paths must be safe absolute paths")
-    if state == source or state.is_relative_to(source) or source.is_relative_to(state):
-        raise QSXError("source and private state must not overlap")
+    if any(
+        private == source or private.is_relative_to(source) or source.is_relative_to(private)
+        for private in (state, disk)
+    ):
+        raise QSXError("source, state and disk boundaries must not overlap")
+    if disk == state or state.is_relative_to(disk):
+        raise QSXError("disk cannot be the state directory or contain it")
     profile = data.get("network_profile", "offline")
     if profile not in {"offline", "openai"}:
         raise QSXError("network_profile must be offline or openai")
@@ -46,6 +56,22 @@ def load(path: Path) -> Config:
     disk_gib = data.get("disk_gib", 60)
     if disk_gib != 60:
         raise QSXError("MathResearch MVP requires a 60 GiB private disk")
+    guest_workspace = data.get("workspace", "/home/agent/workspace/PROJECT")
+    if not isinstance(guest_workspace, str) or not re.fullmatch(
+        r"/home/agent/workspace/[A-Za-z0-9._-]+", guest_workspace
+    ):
+        raise QSXError("guest workspace must be below /home/agent/workspace")
+    image = data.get("base_image", {})
+    base_path = Path(image["path"]).expanduser().resolve() if image.get("path") else None
+    base_hash = image.get("sha256")
+    base_source = image.get("source")
+    base_release = image.get("release")
+    if base_path and (
+        not isinstance(base_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", base_hash)
+    ):
+        raise QSXError("base image requires a lowercase SHA-256")
+    if base_path and (not isinstance(base_source, str) or not isinstance(base_release, str)):
+        raise QSXError("base image source and release must be recorded")
     return Config(
         data["name"],
         source,
@@ -54,6 +80,11 @@ def load(path: Path) -> Config:
         disk_gib,
         profile,
         git.get("branch_prefix", "agent/mathresearch"),
+        guest_workspace,
+        base_path,
+        base_hash,
+        base_source,
+        base_release,
     )
 
 
@@ -61,3 +92,9 @@ def validate_task(task_id: str) -> str:
     if not SAFE_TASK.fullmatch(task_id):
         raise QSXError("task ID must contain only lowercase letters, digits, dot, dash, underscore")
     return task_id
+
+
+def validate_checkpoint_id(checkpoint_id: str) -> str:
+    if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}", checkpoint_id):
+        raise QSXError("malformed checkpoint ID")
+    return checkpoint_id

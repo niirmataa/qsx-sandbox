@@ -1,16 +1,15 @@
 # Ubuntu 24.04 fortress-host acceptance (operator-run)
 
-Run only after review and approval. Save every command, exit code, package version, and result as PASS/FAIL/BLOCKED/NOT RUN.
+Run only after review and approval. Record every command, exit code, version, and PASS/FAIL/BLOCKED/NOT RUN result.
 
-1. `qsx doctor | tee host-doctor.json`; verify `/dev/kvm`, `virsh --connect qemu:///system version`, QEMU, libvirt confinement, RAM, filesystem, free-space and permissions.
-2. Define the generated XML, then `virsh start MathResearch` and `virsh domstate MathResearch`; prove KVM acceleration rather than mere device presence.
-3. `qemu-img info /var/lib/qsx/MathResearch/disks/private.qcow2`; in the guest, verify partition/filesystem capacity is 60 GiB and the disk is private.
-4. `virsh dumpxml MathResearch`; verify no `filesystem`, source-project path, Docker/libvirt socket, host home, USB storage, QMP exposure, or writable removable import medium.
-5. With synthetic data, run create/import and hash source before/after. From guest attempt read/write of source and host sockets; all must fail.
-6. Apply reviewed host firewall/profile rules. For `offline`, test DNS, IPv4, IPv6, UDP, LAN, host-admin and internet—all must fail. Do not infer isolation from absent NIC alone.
-7. For `openai`, authenticate interactively as the guest user, prove the approved OpenAI route succeeds, and prove ordinary internet, direct DNS, IPv4/IPv6/UDP, LAN, metadata and host-admin fail. Stop the proxy and prove fail-closed behavior.
-8. Shut down cleanly, checkpoint clean and dirty states, mutate disk/project, and rollback. Verify files, Git state, guest environment, and append-only controller lifecycle record. Verify active-image checkpoint refusal.
-9. Export to a new destination; inspect branch, commits, baseline diff and metadata. Confirm no keys, auth caches or unrelated VM files. Re-hash the original source.
-10. Copy a checkpoint to a separate encrypted medium, delete only a disposable working copy, restore and boot offline; compare recorded hashes.
+1. Run `qsx doctor | tee host-doctor.json`; verify `/dev/kvm`, actual acceleration, `virsh --connect qemu:///system version`, QEMU confinement, RAM, filesystem, free space, and controller permissions.
+2. Download the documented Ubuntu 24.04 image during controlled setup only. Verify its checksum against the official HTTPS `SHA256SUMS`, record exact release/build, configure the local path/hash, disconnect setup access, and run `qsx create task-001`.
+3. Inspect `qemu-img info` and `virsh dumpxml MathResearch`: independent 60 GiB private QCOW2, read-only import ISO, no backing file, network interface, host `filesystem`, source path, Docker/libvirt socket, host home, USB storage, or QMP exposure.
+4. Hash synthetic source before/after. Start the first boot; verify cloud-init copies Git to `/home/agent/workspace/<project>` on the private filesystem and powers off. Run `qsx finalize-import task-001`; prove the ISO is detached before agent work and guest access/write attempts against source and host sockets fail.
+5. Start again, commit and leave separate uncommitted changes inside the guest, then cleanly `qsx shutdown`. Verify `qsx checkpoint task-001` observes the guest-disk branch/commit/dirty state using read-only libguestfs, not controller staging.
+6. Mutate OS and committed/uncommitted project state, shut down, rollback, boot offline, and verify system, workspace, branch, commits, and dirty files are restored. Verify lifecycle logging remains append-only, active restore is refused, tampered checkpoint/hash is refused, and a unique rescue image precedes replacement.
+7. Apply separately reviewed host network rules. For `offline`, test DNS, IPv4, IPv6, UDP, LAN, metadata, host-admin, and internet—all fail. For `openai`, prove only the approved authenticated OpenAI path works; ordinary internet and direct/alternate routes fail, including fail-closed proxy outage.
+8. Shut down and export through libguestfs to a new directory. Inspect branch, commits, baseline diff, and metadata; confirm no keys/auth caches/unrelated VM files. Re-hash original source.
+9. Copy a checkpoint to separate encrypted storage, remove only a disposable working copy, restore, boot offline, and compare hashes.
 
-Only after all checks pass may a report say `HOST_VALIDATED`. Production firewall installation is outside this cloud change.
+Only after all checks pass may a report say `HOST_VALIDATED`. Cloud results do not satisfy these physical tests.

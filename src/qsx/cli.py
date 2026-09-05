@@ -7,12 +7,15 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from .backend import LibvirtBackend, domain_xml
 from .config import load
-from .disk import Checkpoints, create_disk
+from .disk import Checkpoints
 from .errors import QSXError
+from .provision import GuestProvisioner, OfflineGuestExport, inspect_offline_workspace
+from .util import atomic_json
 from .workspace import export_project, import_project
 
 
@@ -72,6 +75,13 @@ def parser() -> argparse.ArgumentParser:
     export.add_argument("task_id")
     export.add_argument("destination", type=Path)
     sub.add_parser("domain-xml", help="print conservative libvirt domain XML")
+    sub.add_parser("define", help="define the provisioned libvirt domain")
+    sub.add_parser("start", help="start through KVM (never implicit TCG)")
+    sub.add_parser("status", help="show libvirt domain state")
+    shutdown = sub.add_parser("shutdown", help="cleanly stop the domain")
+    shutdown.add_argument("--timeout", type=int, default=120)
+    sub.add_parser("finalize-import", help="detach the import medium while stopped")
+    sub.choices["finalize-import"].add_argument("task_id")
     return p
 
 
@@ -84,19 +94,59 @@ def main(argv: list[str] | None = None) -> int:
         config = load(args.config)
         backend = LibvirtBackend()
         if args.command == "create":
-            if not config.disk.exists():
-                create_disk(config.disk, config.disk_gib)
-            print(json.dumps(import_project(config, args.task_id), indent=2))
+            task = import_project(config, args.task_id)
+            provision_path = config.state_dir / "tasks" / args.task_id / "provision.json"
+            provision = (
+                json.loads(provision_path.read_text())
+                if provision_path.exists()
+                else GuestProvisioner(config).provision(args.task_id)
+            )
+            xml_path = config.state_dir / "domain.xml"
+            xml_path.write_text(
+                domain_xml(config.name, config.disk, Path(provision["import_medium"]))
+            )
+            backend.define(xml_path)
+            print(json.dumps({"task": task, "provision": provision, "domain": "defined"}, indent=2))
         elif args.command == "resume":
             print(json.dumps(import_project(config, args.task_id), indent=2))
         elif args.command == "checkpoint":
-            print(json.dumps(Checkpoints(config, backend.is_active).create(args.task_id), indent=2))
+            print(
+                json.dumps(
+                    Checkpoints(config, backend.is_active, inspect_offline_workspace).create(
+                        args.task_id
+                    ),
+                    indent=2,
+                )
+            )
         elif args.command == "rollback":
-            Checkpoints(config, backend.is_active).rollback(args.checkpoint_id, not args.no_rescue)
+            Checkpoints(config, backend.is_active, inspect_offline_workspace).rollback(
+                args.checkpoint_id, not args.no_rescue
+            )
         elif args.command == "export":
-            export_project(config, args.task_id, args.destination)
+            if backend.is_active(config.name):
+                raise QSXError("controlled export requires a SHUTOFF domain")
+            with tempfile.TemporaryDirectory(dir=config.state_dir) as temporary:
+                workspace = OfflineGuestExport().extract(
+                    config.disk, config.guest_workspace, Path(temporary)
+                )
+                export_project(config, args.task_id, args.destination, workspace)
         elif args.command == "domain-xml":
             print(domain_xml(config.name, config.disk))
+        elif args.command == "define":
+            backend.define(config.state_dir / "domain.xml")
+        elif args.command == "start":
+            backend.start(config.name)
+        elif args.command == "status":
+            print(backend.status(config.name))
+        elif args.command == "shutdown":
+            backend.shutdown(config.name, args.timeout)
+        elif args.command == "finalize-import":
+            provision_path = config.state_dir / "tasks" / args.task_id / "provision.json"
+            provision = json.loads(provision_path.read_text())
+            medium = Path(provision["import_medium"])
+            backend.detach_import_medium(config.name, medium)
+            provision["import_medium_detached"] = True
+            atomic_json(provision_path, provision)
         return 0
     except QSXError as exc:
         print(f"qsx: {exc}", file=sys.stderr)
