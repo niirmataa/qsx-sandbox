@@ -30,3 +30,7 @@ qsx --config qsx.toml export task-001 /new/review-destination
 ```
 
 Export and checkpoint inspect the stopped guest via read-only libguestfs. Export creates a fresh directory containing Git history, baseline diff, and task metadata. There is no Docker dependency, writable source mount, credential provisioning, push, merge, or arbitrary host-shell API.
+
+## Research Memory
+
+Research Memory persists outside the VM and survives rollback. `memory-record` records research/evidence with explicit provenance, `handoff` records continuity, and `memory-render` regenerates CHANGELOG, MEMORY, LIFE, and CONTEXT. See `docs/RESEARCH_MEMORY.md`. Checkpoint lifecycle events are linked automatically; failed and NOT_RUN results remain visible.

@@ -83,7 +83,6 @@ def import_project(config: Config, task_id: str) -> dict[str, object]:
     metadata_path = task_root / "task.json"
     if metadata_path.exists():
         existing = cast(dict[str, object], json.loads(metadata_path.read_text()))
-        _git(task_root / "workspace", "switch", str(existing["branch"]))
         return existing
     if task_root.exists():
         raise QSXError("incomplete task exists; inspect it before retrying")
@@ -158,6 +157,16 @@ def import_project(config: Config, task_id: str) -> dict[str, object]:
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def resume_task(config: Config, task_id: str) -> dict[str, object]:
+    """Return controller truth without mutating the obsolete import staging checkout."""
+    validate_task(task_id)
+    metadata = config.state_dir / "tasks" / task_id / "task.json"
+    provision = config.state_dir / "tasks" / task_id / "provision.json"
+    if not metadata.is_file() or not provision.is_file():
+        raise QSXError("task is not completely provisioned")
+    return cast(dict[str, object], json.loads(metadata.read_text()))
 
 
 def export_project(

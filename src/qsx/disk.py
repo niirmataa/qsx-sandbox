@@ -11,6 +11,7 @@ from typing import Protocol
 
 from .config import Config, validate_checkpoint_id, validate_task
 from .errors import QSXError
+from .memory import ResearchMemory
 from .util import atomic_json, run, sha256
 
 
@@ -22,7 +23,7 @@ def create_disk(path: Path, gib: int = 60) -> None:
 
 
 class WorkspaceInspector(Protocol):
-    def __call__(self, config: Config, task_id: str) -> tuple[str, str, bool, str | None]: ...
+    def __call__(self, config: Config, task_id: str) -> tuple[str, str, bool, str | None, str]: ...
 
 
 class Checkpoints:
@@ -39,14 +40,17 @@ class Checkpoints:
         if self.is_active(self.config.name):
             raise QSXError("cold checkpoint requires a SHUTOFF domain")
         json.loads((self.config.state_dir / "tasks" / task_id / "task.json").read_text())
-        branch, commit, dirty, dirty_hash = self.inspect_workspace(self.config, task_id)
+        branch, commit, dirty, dirty_hash, workspace_hash = self.inspect_workspace(
+            self.config, task_id
+        )
         checkpoint_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
         directory = self.config.state_dir / "checkpoints" / checkpoint_id
         directory.mkdir(parents=True, mode=0o700)
         target = directory / "disk.qcow2"
         shutil.copy2(self.config.disk, target)
         run(["qemu-img", "check", "-f", "qcow2", str(target)])
-        previous = sorted((self.config.state_dir / "checkpoints").glob("*/manifest.json"))
+        pointer_path = self.config.state_dir / "checkpoint-state.json"
+        pointer = json.loads(pointer_path.read_text()) if pointer_path.exists() else {}
         metadata: dict[str, object] = {
             "schema_version": 1,
             "checkpoint_id": checkpoint_id,
@@ -56,8 +60,9 @@ class Checkpoints:
             "git_commit": commit,
             "dirty": dirty,
             "dirty_manifest_sha256": dirty_hash,
+            "workspace_sha256": workspace_hash,
             "timestamp": datetime.now(UTC).isoformat(),
-            "parent_checkpoint": previous[-1].parent.name if previous else None,
+            "parent_checkpoint": pointer.get("current_checkpoint"),
             "disk_image": str(target),
             "disk_sha256": sha256(target),
             "validation_status": validation,
@@ -65,6 +70,17 @@ class Checkpoints:
             "observed_by": "controller",
         }
         atomic_json(directory / "manifest.json", metadata)
+        atomic_json(pointer_path, {"current_checkpoint": checkpoint_id})
+        ResearchMemory(self.config).append(
+            kind="lifecycle",
+            task_id=task_id,
+            summary="Cold checkpoint created from stopped guest disk",
+            status="PASS",
+            origin="controller",
+            evidence="controller_observed",
+            git_commit=commit,
+            checkpoint_id=checkpoint_id,
+        )
         return metadata
 
     def rollback(self, checkpoint_id: str, preserve_current: bool = True) -> None:
@@ -99,3 +115,17 @@ class Checkpoints:
         temporary = self.config.disk.with_suffix(".rollback.tmp")
         shutil.copy2(source, temporary)
         os.replace(temporary, self.config.disk)
+        atomic_json(
+            self.config.state_dir / "checkpoint-state.json",
+            {"current_checkpoint": checkpoint_id},
+        )
+        ResearchMemory(self.config).append(
+            kind="lifecycle",
+            task_id=str(manifest["task_id"]),
+            summary="Guest disk rolled back; controller memory was retained",
+            status="PASS",
+            origin="controller",
+            evidence="controller_observed",
+            git_commit=str(manifest["git_commit"]),
+            checkpoint_id=checkpoint_id,
+        )

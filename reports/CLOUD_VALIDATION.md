@@ -13,6 +13,7 @@ Context is a Codex Cloud runner, not target hardware. Python 3.12.13; Git 2.43.0
 | Hardened rollback | PASS | malformed/traversal IDs, incomplete/tampered image, hash and unique rescues tested | full guest recovery BLOCKED |
 | Offline wheel acceptance | PASS | wheel built without downloads, fresh venv, install `--no-index`, help/doctor outside repo | none for installability |
 | Dependency lock reproduction | PASS | fresh venv, locally cached setup wheels, `pip --require-hashes --no-index`, then `pip check` | lock targets CPython 3.12/Linux x86_64 |
+| Research Memory v1 | PASS | real append/fsync/hash-chain, generated views, negative results, handoff, Git/checkpoint links, rollback lineage | controller filesystem test; not a VM boot |
 | T13 interruption injection | NOT RUN | normal atomic staging is tested | power-loss injection not executed |
 | T14 repository scan | PASS | security audit | heuristic; snapshots may contain secrets |
 | T15 secondary media | NOT RUN | none | requires operator storage |

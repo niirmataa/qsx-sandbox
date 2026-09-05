@@ -14,9 +14,10 @@ from .backend import LibvirtBackend, domain_xml
 from .config import load
 from .disk import Checkpoints
 from .errors import QSXError
+from .memory import ResearchMemory
 from .provision import GuestProvisioner, OfflineGuestExport, inspect_offline_workspace
 from .util import atomic_json
-from .workspace import export_project, import_project
+from .workspace import export_project, import_project, resume_task
 
 
 def doctor() -> dict[str, object]:
@@ -82,6 +83,27 @@ def parser() -> argparse.ArgumentParser:
     shutdown.add_argument("--timeout", type=int, default=120)
     sub.add_parser("finalize-import", help="detach the import medium while stopped")
     sub.choices["finalize-import"].add_argument("task_id")
+    record = sub.add_parser("memory-record", help="append a research/evidence record")
+    record.add_argument("task_id")
+    record.add_argument("kind", choices=["research", "evidence"])
+    record.add_argument("status", choices=["PASS", "FAIL", "BLOCKED", "NOT_RUN"])
+    record.add_argument("summary")
+    record.add_argument("--details", default="")
+    record.add_argument("--origin", choices=["agent", "operator", "controller"], default="agent")
+    record.add_argument(
+        "--evidence",
+        choices=["agent_reported", "controller_observed", "independently_verified"],
+        default="agent_reported",
+    )
+    record.add_argument("--git-commit")
+    record.add_argument("--checkpoint-id")
+    render = sub.add_parser("memory-render", help="regenerate research memory views")
+    render.add_argument("task_id")
+    handoff = sub.add_parser("handoff", help="record a durable task handoff")
+    handoff.add_argument("task_id")
+    handoff.add_argument("summary")
+    handoff.add_argument("--git-commit")
+    handoff.add_argument("--checkpoint-id")
     return p
 
 
@@ -108,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             backend.define(xml_path)
             print(json.dumps({"task": task, "provision": provision, "domain": "defined"}, indent=2))
         elif args.command == "resume":
-            print(json.dumps(import_project(config, args.task_id), indent=2))
+            print(json.dumps(resume_task(config, args.task_id), indent=2))
         elif args.command == "checkpoint":
             print(
                 json.dumps(
@@ -147,6 +169,45 @@ def main(argv: list[str] | None = None) -> int:
             backend.detach_import_medium(config.name, medium)
             provision["import_medium_detached"] = True
             atomic_json(provision_path, provision)
+        elif args.command == "memory-record":
+            record = ResearchMemory(config).append(
+                kind=args.kind,
+                task_id=args.task_id,
+                summary=args.summary,
+                details=args.details,
+                status=args.status,
+                origin=args.origin,
+                evidence=args.evidence,
+                git_commit=args.git_commit,
+                checkpoint_id=args.checkpoint_id,
+            )
+            print(json.dumps(record, indent=2))
+        elif args.command == "memory-render":
+            print(
+                json.dumps(
+                    {
+                        name: str(path)
+                        for name, path in ResearchMemory(config).render(args.task_id).items()
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "handoff":
+            print(
+                json.dumps(
+                    ResearchMemory(config).append(
+                        kind="handoff",
+                        task_id=args.task_id,
+                        summary=args.summary,
+                        status="NOT_RUN",
+                        origin="operator",
+                        evidence="controller_observed",
+                        git_commit=args.git_commit,
+                        checkpoint_id=args.checkpoint_id,
+                    ),
+                    indent=2,
+                )
+            )
         return 0
     except QSXError as exc:
         print(f"qsx: {exc}", file=sys.stderr)

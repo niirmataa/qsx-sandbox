@@ -13,3 +13,7 @@ Run only after review and approval. Record every command, exit code, version, an
 9. Copy a checkpoint to separate encrypted storage, remove only a disposable working copy, restore, boot offline, and compare hashes.
 
 Only after all checks pass may a report say `HOST_VALIDATED`. Cloud results do not satisfy these physical tests.
+
+## Research-memory acceptance
+
+Create CP-A, CP-B, roll back to CP-A, then create CP-C. Verify CP-C names CP-A as parent while LIFE retains creation of A/B, the rollback, and creation of C. Record an agent FAIL and separate independently verified evidence; ensure both survive rollback and appear with distinct provenance in current CONTEXT and handoff. Confirm the journal and generated views reside under controller state, not inside the restored disk.

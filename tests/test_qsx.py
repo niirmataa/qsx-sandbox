@@ -12,8 +12,9 @@ from qsx.config import Config
 from qsx.config import load as load_config
 from qsx.disk import Checkpoints, create_disk
 from qsx.errors import QSXError
+from qsx.memory import ResearchMemory
 from qsx.provision import GuestProvisioner
-from qsx.workspace import export_project, import_project
+from qsx.workspace import export_project, import_project, resume_task
 
 
 def git(repo: Path, *args: str) -> str:
@@ -31,7 +32,7 @@ def digest(root: Path) -> str:
     return h.hexdigest()
 
 
-def inspect_staging(config: Config, task_id: str) -> tuple[str, str, bool, str | None]:
+def inspect_staging(config: Config, task_id: str) -> tuple[str, str, bool, str | None, str]:
     workspace = config.state_dir / "tasks" / task_id / "workspace"
     branch = git(workspace, "branch", "--show-current")
     commit = git(workspace, "rev-parse", "HEAD")
@@ -41,6 +42,7 @@ def inspect_staging(config: Config, task_id: str) -> tuple[str, str, bool, str |
         commit,
         bool(status),
         hashlib.sha256(status.encode()).hexdigest() if status else None,
+        digest(workspace),
     )
 
 
@@ -75,6 +77,17 @@ def test_real_git_import_preserves_source_and_resumes(cfg: Config, kind: str) ->
     assert (workspace / "a.txt").read_text() == (cfg.source / "a.txt").read_text()
     if kind == "dirty":
         assert (workspace / "included.cache").exists()
+
+
+def test_resume_does_not_switch_host_staging(cfg: Config) -> None:
+    (cfg.source / "x").write_text("x")
+    task = import_project(cfg, "task")
+    workspace = cfg.state_dir / "tasks/task/workspace"
+    git(workspace, "switch", "-c", "host-staging-must-not-drive-resume")
+    (cfg.state_dir / "tasks/task/provision.json").write_text("{}")
+    resumed = resume_task(cfg, "task")
+    assert resumed["run_id"] == task["run_id"]
+    assert git(workspace, "branch", "--show-current") == "host-staging-must-not-drive-resume"
 
 
 def test_unsafe_symlink_and_export_collision(cfg: Config) -> None:
@@ -173,6 +186,29 @@ def test_two_rollbacks_make_unique_rescues(cfg: Config) -> None:
     checkpoints.rollback(checkpoint_id)
     checkpoints.rollback(checkpoint_id)
     assert len(list((cfg.state_dir / "rescue").glob("*.qcow2"))) == 2
+
+
+def test_checkpoint_parent_follows_rollback_lineage(cfg: Config) -> None:
+    (cfg.source / "x").write_text("a")
+    import_project(cfg, "task")
+    create_disk(cfg.disk, 1)
+    checkpoints = Checkpoints(cfg, lambda _: False, inspect_staging)
+    checkpoint_a = checkpoints.create("task")
+    (cfg.state_dir / "tasks/task/workspace/x").write_text("b")
+    checkpoint_b = checkpoints.create("task")
+    assert checkpoint_b["parent_checkpoint"] == checkpoint_a["checkpoint_id"]
+    checkpoints.rollback(str(checkpoint_a["checkpoint_id"]))
+    (cfg.state_dir / "tasks/task/workspace/x").write_text("c")
+    checkpoint_c = checkpoints.create("task")
+    assert checkpoint_c["parent_checkpoint"] == checkpoint_a["checkpoint_id"]
+    assert checkpoint_c["parent_checkpoint"] != checkpoint_b["checkpoint_id"]
+    lifecycle = ResearchMemory(cfg).records()
+    assert [record["checkpoint_id"] for record in lifecycle] == [
+        checkpoint_a["checkpoint_id"],
+        checkpoint_b["checkpoint_id"],
+        checkpoint_a["checkpoint_id"],
+        checkpoint_c["checkpoint_id"],
+    ]
 
 
 def test_real_offline_guest_provisioning(cfg: Config, tmp_path: Path) -> None:

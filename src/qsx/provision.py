@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import tarfile
 import tempfile
 from pathlib import Path
@@ -10,6 +12,25 @@ from pathlib import Path
 from .config import Config
 from .errors import QSXError
 from .util import atomic_json, run, sha256
+
+
+def workspace_fingerprint(root: Path) -> str:
+    """Hash workspace names, types, links and bytes without executing project content."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] == ".git":
+            continue
+        info = path.lstat()
+        digest.update(os.fsencode(str(relative)))
+        digest.update(str(stat.S_IFMT(info.st_mode)).encode())
+        if path.is_symlink():
+            digest.update(os.fsencode(os.readlink(path)))
+        elif path.is_file():
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+    return digest.hexdigest()
 
 
 class GuestProvisioner:
@@ -144,7 +165,9 @@ class OfflineGuestExport:
         return extracted
 
 
-def inspect_offline_workspace(config: Config, task_id: str) -> tuple[str, str, bool, str | None]:
+def inspect_offline_workspace(
+    config: Config, task_id: str
+) -> tuple[str, str, bool, str | None, str]:
     """Observe Git inside a stopped disk; the host import staging is never authoritative."""
     del task_id
     with tempfile.TemporaryDirectory(dir=config.state_dir) as temporary:
@@ -155,4 +178,4 @@ def inspect_offline_workspace(config: Config, task_id: str) -> tuple[str, str, b
         commit = run(["git", "rev-parse", "HEAD"], workspace)
         status = run(["git", "status", "--porcelain=v1"], workspace)
         dirty_hash = hashlib.sha256(status.encode()).hexdigest() if status else None
-        return branch, commit, bool(status), dirty_hash
+        return branch, commit, bool(status), dirty_hash, workspace_fingerprint(workspace)
