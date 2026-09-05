@@ -1,0 +1,17 @@
+.venv/
+.qsx-reports/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.qcow2
+*.img
+*.iso
+.env
+.env.*
+!.env.example
+auth.json

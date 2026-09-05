@@ -1,0 +1,17 @@
+Zaimplementuj QSX MVP zgodnie z AGENTS.md, docs/QSX_MVP_AGENT_TASK.md
+oraz docs/CODEX_CLOUD.md. Pracujesz w Codex Cloud bez dostępu do laptopa.
+
+Dostarcz działający kod i prawdziwe testy, nie sam projekt i nie mockowy produkt.
+Zacznij od nieinwazyjnego rozpoznania runnera; nie myl go z docelowym hostem.
+
+Priorytet: import bez zmiany źródła → baseline i gałąź zadania → rygor commitów
+→ checkpoint/restore → eksport. Zaimplementuj też adapter libvirt i profile
+sieci, ale odbiór faktycznej izolacji pozostaw do testów lokalnych.
+
+Brak KVM nie blokuje testów logiki, realnego Git i nieaktywnych QCOW2.
+Nie obchodź ograniczeń platformy i nie proś o klucze do domowego serwera.
+Uzupełnij lockfile, make test-cloud, raport dowodów i LOCAL_ACCEPTANCE.md.
+
+Nie wdrażaj teraz MCP, wielu agentów ani zdalnego pulpitu. Nie uruchamiaj
+instalatora hosta. Wynik ma być gotowy do lokalnego odbioru, nie deklarowany
+jako wdrożony bez przeprowadzenia tego odbioru.
