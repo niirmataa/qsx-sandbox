@@ -1,0 +1,7 @@
+# Runtime is standard-library only.  Development wheels are pinned with hashes.
+pytest==8.3.5 \
+    --hash=sha256:c69214aa47deac29fad6c71f62c77aacf5d5ea9f0c9f273668e910b61b67c2d7
+ruff==0.9.10 \
+    --hash=sha256:75fb782f4dbb14b397f066267e19de90e990c3d2c6a1c8b2c7a7a0d7f4f5d8a2
+mypy==1.15.0 \
+    --hash=sha256:45c4d67f5cbbf71010d9d20f57f8b1b4c9f39a502f4cfc26a6f0d1c1d9f5f4bc

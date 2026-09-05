@@ -1,0 +1,15 @@
+schema_version = 1
+name = "MathResearch"
+source = "/srv/qsx-input/PROJECT"
+state_dir = "/var/lib/qsx/MathResearch"
+disk = "/var/lib/qsx/MathResearch/disks/private.qcow2"
+disk_gib = 60
+network_profile = "offline"
+[git]
+branch_prefix = "agent/mathresearch"
+source_read_only = true
+allow_push = false
+[checkpoints]
+mode = "cold"
+retain_recent = 5
+protect_baseline = true
