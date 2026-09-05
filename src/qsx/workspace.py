@@ -13,6 +13,7 @@ from typing import cast
 
 from .config import Config, validate_task
 from .errors import QSXError
+from .memory import ResearchMemory
 from .util import atomic_json, run
 
 EXCLUDED_NAMES = {".git", ".ssh", ".gnupg", ".aws", ".codex", "id_rsa", "id_ed25519"}
@@ -138,11 +139,31 @@ def import_project(config: Config, task_id: str) -> dict[str, object]:
         branch = f"{config.branch_prefix}/{task_id}"
         _git(workspace, "switch", "-c", branch)
         manifest_bytes = json.dumps(before, sort_keys=True).encode()
+        identity_path = config.state_dir / "project-identity.json"
+        if identity_path.exists():
+            project_id = str(json.loads(identity_path.read_text())["project_id"])
+        else:
+            project_id = str(uuid.uuid4())
+            atomic_json(
+                identity_path,
+                {
+                    "schema_version": 1,
+                    "project_id": project_id,
+                    "source_at_creation": str(source),
+                },
+            )
+        run_id = str(uuid.uuid4())
         data: dict[str, object] = {
             "schema_version": 1,
+            "project_id": project_id,
+            "environment_id": str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"qsx:{config.name}:{config.state_dir}")
+            ),
             "environment": config.name,
             "task_id": task_id,
-            "run_id": str(uuid.uuid4()),
+            "run_id": run_id,
+            "session_id": run_id,
+            "lineage_id": str(uuid.uuid4()),
             "branch": branch,
             "source_commit": source_commit,
             "baseline_commit": baseline,
@@ -190,6 +211,7 @@ def export_project(
         atomic_json(temporary / ".qsx-export/task.json", data)
         diff = _git(workspace, "diff", f"{data['baseline_commit']}..{data['branch']}")
         (temporary / ".qsx-export/baseline.diff").write_text(diff)
+        ResearchMemory(config).export_bundle(task_id, temporary / ".qsx-export/research")
         os.replace(temporary, destination)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)

@@ -37,3 +37,9 @@ odróżniać implementację, test symulowany, rzeczywistą integrację i lokalny
 Kod + testy + raport + instrukcja lokalnego odbioru. Implementuj teraz jedną VM,
 bez MCP, klastra i zdalnego pulpitu. Plan dalszej infrastruktury pozostaje w
 specyfikacji. Status HOST_VALIDATED wymaga późniejszego testu na laptopie.
+
+## Research Memory procedure for a QSX guest task
+
+This section specifies the product handoff procedure; it is not evidence that an agent understood it. At session start, read the controller-generated, read-only `research/manifest.json` and `research/CONTEXT.md`; record the consumed journal revision as a process acknowledgement only. Treat `LOCAL_PENDING` warnings as not yet durable. Do not edit generated views as a source of truth.
+
+Before a research step, assign a stable `step_id`. Run project code only inside the guest, record an explicit public note with question, assumptions, method, inputs/seed/tool versions, observation, limitations, applicability, evidence references and execution status, then deliberately stage/commit relevant changes. Before ending, place a bounded JSON note in the guest outbox and request stopped-guest collection/handoff. Do not include private chain-of-thought, credentials, auth caches, or full unapproved transcripts. A guest PASS remains `GUEST_REPORTED` until separately checked.

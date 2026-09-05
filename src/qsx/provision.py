@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import shutil
-import stat
 import tarfile
 import tempfile
 from pathlib import Path
@@ -15,22 +14,35 @@ from .util import atomic_json, run, sha256
 
 
 def workspace_fingerprint(root: Path) -> str:
-    """Hash workspace names, types, links and bytes without executing project content."""
-    digest = hashlib.sha256()
+    """Hash a canonical v1 manifest; `.git` is the sole excluded top-level tree."""
+    entries: list[dict[str, object]] = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
         if relative.parts and relative.parts[0] == ".git":
             continue
         info = path.lstat()
-        digest.update(os.fsencode(str(relative)))
-        digest.update(str(stat.S_IFMT(info.st_mode)).encode())
+        entry: dict[str, object] = {
+            "path_utf8": str(relative),
+            "mode": info.st_mode & 0o777,
+        }
         if path.is_symlink():
-            digest.update(os.fsencode(os.readlink(path)))
+            entry.update({"type": "symlink", "target_utf8": os.readlink(path)})
         elif path.is_file():
+            digest = hashlib.sha256()
             with path.open("rb") as stream:
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(block)
-    return digest.hexdigest()
+            entry.update({"type": "file", "size": info.st_size, "sha256": digest.hexdigest()})
+        elif path.is_dir():
+            entry.update({"type": "directory"})
+        else:
+            raise QSXError(f"unsupported workspace object: {relative}")
+        entries.append(entry)
+    manifest = {"schema": "qsx-workspace-manifest-v1", "excluded": [".git/**"], "entries": entries}
+    encoded = json.dumps(
+        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class GuestProvisioner:

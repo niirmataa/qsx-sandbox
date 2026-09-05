@@ -17,3 +17,5 @@ Only after all checks pass may a report say `HOST_VALIDATED`. Cloud results do n
 ## Research-memory acceptance
 
 Create CP-A, CP-B, roll back to CP-A, then create CP-C. Verify CP-C names CP-A as parent while LIFE retains creation of A/B, the rollback, and creation of C. Record an agent FAIL and separate independently verified evidence; ensure both survive rollback and appear with distinct provenance in current CONTEXT and handoff. Confirm the journal and generated views reside under controller state, not inside the restored disk.
+
+Collect a real stopped-guest outbox twice and verify one controller event per operation ID, `GUEST_REPORTED` provenance regardless of claimed role, and no guest access to `ledger.sqlite3`. Build a handoff bundle, consume its revision in a new session, change guest HEAD/content, and prove the old bundle becomes STALE. Copy ledger/JSONL, manifests, disk and approved artifacts to a genuinely separate protected medium; restore on a new trusted host and report missing artifacts/unsigned trust anchors explicitly. These remain BLOCKED until performed physically.

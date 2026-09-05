@@ -13,11 +13,19 @@ Context is a Codex Cloud runner, not target hardware. Python 3.12.13; Git 2.43.0
 | Hardened rollback | PASS | malformed/traversal IDs, incomplete/tampered image, hash and unique rescues tested | full guest recovery BLOCKED |
 | Offline wheel acceptance | PASS | wheel built without downloads, fresh venv, install `--no-index`, help/doctor outside repo | none for installability |
 | Dependency lock reproduction | PASS | fresh venv, locally cached setup wheels, `pip --require-hashes --no-index`, then `pip check` | lock targets CPython 3.12/Linux x86_64 |
-| Research Memory v1 | PASS | real append/fsync/hash-chain, generated views, negative results, handoff, Git/checkpoint links, rollback lineage | controller filesystem test; not a VM boot |
+| Research Memory v1 | PASS | real SQLite/WAL transactions, concurrent writes, idempotency, recovery, local chain, context budget/staleness, artifacts, outbox classification, generated views and rollback lineage | synthetic controller filesystems; physical guest collection BLOCKED |
 | T13 interruption injection | NOT RUN | normal atomic staging is tested | power-loss injection not executed |
 | T14 repository scan | PASS | security audit | heuristic; snapshots may contain secrets |
 | T15 secondary media | NOT RUN | none | requires operator storage |
 | Real KVM/VM boot/firewall/OpenAI route | BLOCKED | `/dev/kvm` absent and no target host | physical-host acceptance required |
 | Optional TCG boot | NOT RUN | no approved boot fixture | never a production fallback |
 
-Mandatory cloud gates executed here are PASS. This is `CLOUD_VALIDATED` for implementation and offline integration only; it is explicitly not `HOST_VALIDATED`, and no claim is made that a booted rollback or network boundary works.
+The expanded suite executed 36 tests. Mandatory cloud gates executed here are PASS. This is `CLOUD_VALIDATED` for implementation and offline integration only; it is explicitly not `HOST_VALIDATED`, and no claim is made that a booted rollback or network boundary works.
+
+## Synthetic lineage evidence
+
+The real-qemu-img controller test produced the logical sequence `CP-A → CP-B → rollback(CP-A) → CP-C`. Assertions verified that CP-C's parent is CP-A, CP-B remains in chronological LIFE, rollback establishes a new lineage, and controller memory is not restored with the disk. This is Cloud evidence for metadata/controller behavior, not proof that a bootable guest was restored.
+
+## Remaining gaps
+
+PARTIAL: fault injection does not yet cover every filesystem crash point after QCOW2 replacement; Git/checkpoint evidence has integration coverage but not every cross-task/corruption combination; context is built for a read-only delivery medium but attaching/consuming that medium is physical acceptance. MISSING/NOT RUN: signed external trust anchors and protected signing keys, real separate-media restoration, and trusted-time validation. BLOCKED: real stopped-guest outbox collection, boot/rollback, KVM, libvirt confinement, and network isolation on the operator host.

@@ -7,3 +7,5 @@
 5. Start restored state with the offline profile, inspect Git/files/rules/credentials, then deliberately re-enable allowed connectivity.
 
 A full checkpoint is not an independent backup. Never manipulate an active image with `qemu-img` or filesystem copying.
+
+Research Memory restoration requires an independently copied `events.jsonl`, task/project identity, state/checkpoint manifests, approved artifacts, configuration versions, and—when later implemented—an independently provisioned verification key and anchor. Restore into an empty ledger, verify local chain/project identity, and treat every missing artifact as missing. A same-disk copy is not an independent witness or backup. The current v1 unsigned anchor cannot establish authenticity against a compromised controller.

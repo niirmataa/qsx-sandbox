@@ -13,7 +13,7 @@ from qsx.config import load as load_config
 from qsx.disk import Checkpoints, create_disk
 from qsx.errors import QSXError
 from qsx.memory import ResearchMemory
-from qsx.provision import GuestProvisioner
+from qsx.provision import GuestProvisioner, workspace_fingerprint
 from qsx.workspace import export_project, import_project, resume_task
 
 
@@ -108,6 +108,8 @@ def test_export_is_new_reviewable_copy(cfg: Config, tmp_path: Path) -> None:
     destination = tmp_path / "export"
     export_project(cfg, "task", destination)
     assert (destination / ".git").is_dir() and (destination / ".qsx-export/task.json").is_file()
+    assert (destination / ".qsx-export/research/CONTEXT.md").is_file()
+    assert (destination / ".qsx-export/research/events.jsonl").is_file()
     with pytest.raises(QSXError):
         export_project(cfg, "task", destination)
 
@@ -275,3 +277,20 @@ def test_libvirt_lifecycle_contract_and_collision(tmp_path: Path) -> None:
 
     with pytest.raises(QSXError, match="already exists"):
         ExistingBackend().define(xml)
+
+
+def test_workspace_manifest_fingerprint_is_unambiguous_and_mode_sensitive(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    changed = workspace / "changed.txt"
+    changed.write_text("first")
+    changed.chmod(0o644)
+    first = workspace_fingerprint(workspace)
+    changed.write_text("other")  # same length and same conceptual git-status category
+    second = workspace_fingerprint(workspace)
+    changed.chmod(0o744)
+    third = workspace_fingerprint(workspace)
+    (workspace / ".git").mkdir()
+    (workspace / ".git/volatile").write_text("ignored by documented scope")
+    assert len({first, second, third}) == 3
+    assert workspace_fingerprint(workspace) == third
