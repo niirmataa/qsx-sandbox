@@ -1,0 +1,104 @@
+# EXPERIMENTAL_NOT_BUILT: native Alpine source-build candidate.
+# Source identities and APK names checked; compilation/readiness not executed.
+# Requires explicit policies/research.example.toml and a long image-build timeout.
+schema_version = 1
+name = "sage-lean4"
+description = "EXPERIMENTAL_NOT_BUILT: Alpine 3.24.1 with native SageMath 10.8, Lean 4.33.1 and the separate Codex agent profile."
+agent_profile = "../agent-profiles/codex.toml"
+packages = [
+  "bash", "git", "tar", "coreutils", "mount", "build-base", "binutils",
+  "make", "m4", "perl", "python3", "python3-dev", "py3-pip",
+  "py3-setuptools", "py3-wheel", "py3-virtualenv", "bc", "gfortran",
+  "ca-certificates", "patch", "bzip2", "xz", "file", "pkgconf",
+  "zlib-dev", "boost-dev", "gmp-dev", "libuv-dev", "openssl-dev",
+  "libffi-dev", "ncurses-dev", "readline-dev", "sqlite-dev", "bzip2-dev",
+  "xz-dev", "linux-headers", "cmake", "autoconf", "automake", "libtool",
+  "texinfo",
+]
+prepare = [
+  "install -d -m 0755 -o agent -g agent /opt/sage-10.8 /opt/lean-4.33.1 /var/tmp/qsx-science-build",
+  "cp /mnt/qsx-build/artifacts/sage-10.8.tar.gz /mnt/qsx-build/artifacts/lean4-4.33.1.tar.gz /mnt/qsx-build/artifacts/cadical-rel-2.1.2.tar.gz /mnt/qsx-build/artifacts/leantar-v0.1.20-x86_64-unknown-linux-musl.tar.gz /var/tmp/qsx-science-build/",
+  "chown -R agent:agent /var/tmp/qsx-science-build",
+  "su -s /bin/sh agent -c /usr/local/libexec/qsx-build-sage-lean.sh",
+  "chown -R root:root /opt/sage-10.8 /opt/lean-4.33.1",
+  "ln -s /opt/sage-10.8/sage /usr/local/bin/sage",
+  "for binary in /opt/lean-4.33.1/bin/*; do test -f \"$binary\" && test -x \"$binary\" || continue; ln -s \"$binary\" /usr/local/bin/\"$(basename \"$binary\")\"; done",
+  "rm -rf /var/tmp/qsx-science-build",
+]
+readiness = [
+  "sage --version",
+  "sage -c 'assert ZZ(2)**10 == 1024; assert GF(7)(3)**6 == 1'",
+  "lean --version",
+  "lake --version",
+  "printf '%s\\n' 'example (n : Nat) : n + 0 = n := rfl' > /workspace/project/.qsx-lean-smoke.lean",
+  "lean /workspace/project/.qsx-lean-smoke.lean",
+  "rm /workspace/project/.qsx-lean-smoke.lean",
+]
+
+[resources]
+memory_mib = 16384
+vcpus = 8
+disk_gib = 64
+
+[[artifacts]]
+name = "sage-10.8.tar.gz"
+url = "https://github.com/sagemath/sage/releases/download/10.8/sage-10.8.tar.gz"
+sha256 = "87cf8a0bfa028fb5cc3eec9df0571088d73f650cbe6a4584c7652444d5c6ff1c"
+
+[[artifacts]]
+name = "lean4-4.33.1.tar.gz"
+url = "https://codeload.github.com/leanprover/lean4/tar.gz/refs/tags/v4.33.1"
+sha256 = "561b500da16419aec0baeba5dc47ad11979b5bdcd30a02aafc88c3eed599b766"
+
+[[artifacts]]
+name = "cadical-rel-2.1.2.tar.gz"
+url = "https://codeload.github.com/arminbiere/cadical/tar.gz/refs/tags/rel-2.1.2"
+sha256 = "292c2bb8d712d6d05fce3d3df63b922b8fa45e03974a79f7bae5bf68c284f131"
+
+[[artifacts]]
+name = "leantar-v0.1.20-x86_64-unknown-linux-musl.tar.gz"
+url = "https://github.com/digama0/leangz/releases/download/v0.1.20/leantar-v0.1.20-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "1789878731efbd6eb56515dbe511f7836547defde237cf5e4b29e78eaedaeb86"
+
+[[files]]
+path = "/usr/local/libexec/qsx-build-sage-lean.sh"
+mode = "0755"
+content = '''#!/bin/sh
+set -eu
+umask 022
+test "$(id -un)" = agent
+test "$(id -u)" -ne 0
+jobs=4
+work=/var/tmp/qsx-science-build
+mkdir -p "$work/cadical" "$work/leantar" "$work/lean"
+tar -xzf "$work/cadical-rel-2.1.2.tar.gz" -C "$work/cadical" --strip-components=1 --no-same-owner --no-same-permissions
+tar -xzf "$work/leantar-v0.1.20-x86_64-unknown-linux-musl.tar.gz" -C "$work/leantar" --strip-components=1 --no-same-owner --no-same-permissions
+tar -xzf "$work/lean4-4.33.1.tar.gz" -C "$work/lean" --strip-components=1 --no-same-owner --no-same-permissions
+tar -xzf "$work/sage-10.8.tar.gz" -C /opt/sage-10.8 --strip-components=1 --no-same-owner --no-same-permissions
+
+cd "$work/cadical"
+CXX=g++ ./configure
+make -j"$jobs"
+test -x "$work/cadical/build/cadical"
+test -x "$work/leantar/leantar"
+
+cd "$work/lean"
+cmake --preset release \
+  -DCMAKE_INSTALL_PREFIX=/opt/lean-4.33.1 \
+  -DCADICAL="$work/cadical/build/cadical" \
+  -DLEANTAR="$work/leantar/leantar" \
+  -DUSE_MIMALLOC=OFF \
+  -DUSE_LAKE_CACHE=OFF \
+  -DUSE_GITHASH=OFF \
+  -DLLVM=OFF \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+cmake --build build/release --target stage1 --parallel "$jobs"
+cmake --install build/release/stage1
+
+# The full release archive includes upstream/ for the classical offline build.
+# Keep Sage in place: the classical build has no separate make-install phase.
+cd /opt/sage-10.8
+test -d upstream
+./configure
+make -j"$jobs" build
+'''

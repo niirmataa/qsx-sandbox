@@ -1,0 +1,20 @@
+schema_version = 1
+name = "codex"
+description = "Official pinned Codex CLI with workspace-write client sandbox."
+packages = []
+argv = ["codex"]
+# Supported by this exact release: host-selected sandbox (no "linux" subcommand).
+# No model call or authentication. Check the allowed workspace write and denied
+# write to an ordinary agent-owned path outside the workspace.
+readiness = [
+  "codex --version",
+  "codex login --help | grep -q -- --device-auth",
+  "touch /home/agent/.qsx-outside-probe && rm /home/agent/.qsx-outside-probe",
+  '''codex -c 'sandbox_mode="workspace-write"' sandbox -- /bin/sh -ec 'test "$(id -u)" -ne 0; printf ok > /workspace/project/.qsx-sandbox-probe; if (printf denied > /home/agent/.qsx-outside-probe) 2>/dev/null; then rm /home/agent/.qsx-outside-probe; exit 23; fi; rm /workspace/project/.qsx-sandbox-probe'''',
+]
+
+[codex]
+enabled = true
+version = "0.153.4"
+url = "https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "a822187e1a2420c61c5926721bfbd878701ed95547c9bb0d4de4498a16ba1821"

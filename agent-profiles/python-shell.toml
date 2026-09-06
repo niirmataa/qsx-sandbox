@@ -1,0 +1,9 @@
+schema_version = 1
+name = "python-shell"
+description = "Interactive Python shell without Codex or model authentication."
+packages = ["python3"]
+argv = ["python3", "-q"]
+readiness = ["python3 -c 'assert pow(7, 12, 13) == 1'"]
+
+[codex]
+enabled = false

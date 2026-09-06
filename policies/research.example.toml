@@ -1,0 +1,10 @@
+# Explicit operator-owned example for the larger SageMath + Lean image.
+# Copy/review it outside imported projects before local use.
+# These maxima do not establish available host RAM, CPU, or free disk space.
+schema_version = 1
+network_profile = "offline"
+
+[limits]
+memory_mib = 16384
+vcpus = 8
+disk_gib = 64

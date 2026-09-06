@@ -1,0 +1,7 @@
+schema_version = 1
+name = "python-tests"
+extends = "starter.toml"
+agent_profile = "../agent-profiles/python-shell.toml"
+description = "Python and pytest for small reproducible experiments."
+packages = ["python3", "py3-pytest"]
+readiness = ["python3 -c 'assert pow(7, 12, 13) == 1'", "python3 -m pytest --version"]

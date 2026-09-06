@@ -1,0 +1,6 @@
+schema_version = 1
+name = "c-build"
+extends = "starter.toml"
+description = "C compiler and make, chosen by this recipe only."
+packages = ["gcc", "musl-dev", "make"]
+readiness = ["gcc --version", "printf 'int main(void){return 0;}\\n' > /tmp/qsx-check.c && gcc /tmp/qsx-check.c -o /tmp/qsx-check && /tmp/qsx-check && rm /tmp/qsx-check /tmp/qsx-check.c"]

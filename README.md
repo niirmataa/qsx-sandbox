@@ -1,3 +1,35 @@
+# QSX Alpine — aktualna implementacja
+
+Na gałęzi `feat/alpine-task-images` znajduje się samodzielny pakiet
+`qsx-alpine`: receptura zadania i profil agenta → obraz Alpine → prywatna
+instancja QEMU/KVM z lokalną konsolą. Rdzeń starego QSX pozostaje na
+`archive/qsx-core-pr1-3eb4908` jako materiał odniesienia.
+
+Obowiązuje [aktywny zakres](ACTIVE_SCOPE_PL.md). Format danych i komendy opisano
+w [recepturach](templates/README.md), odbiór lokalny w
+[runbooku Debiana 13](docs/DEBIAN_RUNBOOK_PL.md), a kontynuację pracy w
+[przekazaniu do Astry ULTRA](docs/HANDOFF_ASTRA_ULTRA_PL.md).
+
+Instalacja pakietu w prywatnym venv (Python 3.12 lub nowszy):
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-deps --no-build-isolation --no-index .
+.venv/bin/qsx-alpine --help
+.venv/bin/qsx-alpine doctor
+```
+
+Pakiet nie ma zależności Pythona w czasie działania. Narzędzia hosta i dostęp
+libvirt/KVM sprawdza runbook. Receptury, profile i polityka operatora są osobnymi
+plikami dostarczonymi z kodem. Testy developerskie wymagają
+`requirements-dev.lock`; dokładne wyniki Work zawiera `docs/WORK_VALIDATION_PL.md`.
+Budowa i rozruch docelowych obrazów oraz zalogowana sesja modelu czekają na
+lokalny odbiór. Nie wykonano merge ani aktualizacji PR #1.
+
+---
+
+Poniżej zachowano wcześniejszy dokument pakietu startowego jako tło historyczne.
+
 # QSX — pakiet startowy zadania Codex Cloud
 
 To specyfikacja, instrukcje agenta i skrypty przygotowania narzędzi developerskich.

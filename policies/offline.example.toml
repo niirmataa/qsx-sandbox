@@ -1,0 +1,8 @@
+# Operator-owned maxima. Recipe resources are requests, never grants.
+schema_version = 1
+network_profile = "offline"
+
+[limits]
+memory_mib = 4096
+vcpus = 4
+disk_gib = 64

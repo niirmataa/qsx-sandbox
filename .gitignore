@@ -1,4 +1,8 @@
 .venv/
+.venv
+*.bundle
+cache/
+deliverables/
 .qsx-reports/
 __pycache__/
 .pytest_cache/

@@ -1,0 +1,17 @@
+schema_version = 1
+name = "crypto-math"
+extends = "python-tests.toml"
+agent_profile = "../agent-profiles/python-shell.toml"
+description = "Small exact-arithmetic workshop: Python, SymPy, pytest and OpenSSL."
+packages = ["openssl", "py3-sympy"]
+readiness = [
+  "openssl version",
+  "python3 -c 'from sympy import isprime, mod_inverse; assert isprime(101); assert mod_inverse(7, 101) == 29'",
+]
+
+# SageMath can be a separate, larger task image. This recipe has no SageMath.
+# Resource requests remain bounded by the independent operator policy.
+[resources]
+memory_mib = 2048
+vcpus = 2
+disk_gib = 8

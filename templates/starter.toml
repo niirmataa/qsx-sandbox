@@ -1,0 +1,11 @@
+schema_version = 1
+name = "starter"
+agent_profile = "../agent-profiles/codex.toml"
+description = "Small Alpine workspace with Git, terminal and pinned Codex CLI."
+packages = []
+readiness = ["git --version", "test -w /workspace/project"]
+
+[resources]
+memory_mib = 1024
+vcpus = 1
+disk_gib = 8

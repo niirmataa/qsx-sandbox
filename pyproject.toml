@@ -1,0 +1,24 @@
+[build-system]
+requires = []
+build-backend = "qsx_build"
+backend-path = ["build_backend"]
+
+[project]
+name = "qsx-alpine"
+version = "0.1.0"
+description = "Standalone task-recipe builder and runner for private Alpine sandboxes"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+qsx-alpine = "qsx_alpine.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+strict = true
+packages = ["qsx_alpine"]
