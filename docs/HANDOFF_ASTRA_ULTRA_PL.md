@@ -49,8 +49,12 @@ Obrazy robocze powstaną u operatora. Nie ma zaliczonej sesji zalogowanego model
    Osobno dokończ warsztat SageMath + Lean 4 według
    `docs/SAGE_LEAN_TEMPLATE_PL.md`. Jest recepturą eksperymentalną do kompilacji
    ze źródeł, nie gotowym obrazem ani zaliczonym buildem. Zweryfikuj przypięte
-   wejścia, dobierz jawnie politykę zasobów i dłuższy timeout. Nie zamieniaj
-   Alpine na inną dystrybucję ani nie pobieraj zależności w fazie offline.
+   wejścia, dobierz jawnie politykę zasobów i dłuższy timeout. Zachowaj Alpine
+   jako system VM. Jeśli natywna kompilacja będzie przeszkodą, operator dopuścił
+   osobny cięższy wariant z narzędziami w Dockerze wewnątrz tej VM.
+   Przypnij obrazy kontenerów digestami i zachowaj je jako wejścia offline;
+   nie podłączaj socketa Docker hosta. Obecny pakiet nie implementuje jeszcze
+   tego wariantu. Nie pobieraj zależności w fazie offline.
 8. Uruchom profil Codex w gościu. Test jego lokalnego sandboxu nie zastępuje
    zalogowanej pracy modelu. Nie stosuj automatycznego obejścia ograniczeń klienta.
 9. Obecny runner nie implementuje zatwierdzonego transportu wyjścia do OpenAI.

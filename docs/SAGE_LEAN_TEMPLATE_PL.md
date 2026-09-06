@@ -106,3 +106,20 @@ przyczynę błędu, poprawić recepturę lub przypięte źródła, a następnie 
 nowy lock i nowy obraz. Nie deklarujemy rozmiaru gotowej instalacji,
 powtarzalności bitowej ani sukcesu kompilacji przed tym odbiorem. Dane
 projektów, poświadczenia i logowanie operatora pozostają poza bazą.
+
+## Dopuszczony wariant zapasowy: Docker w VM
+
+Operator dopuścił cięższy wariant, jeśli natywna kompilacja na Alpine okaże
+się przeszkodą na tym etapie. Systemem VM zarządzanej przez QSX pozostaje
+Alpine; SageMath i Lean mogą działać w kontenerach wewnątrz niej. Kontener
+może dostarczyć środowisko użytkowe właściwe dla narzędzi. Silnik Docker
+działa wtedy w gościu, bez dostępu do socketa Docker hosta.
+
+To osobna receptura, z jawnie dobranymi zasobami, obrazami przypiętymi
+digestami i zachowanymi archiwami OCI/Docker do ładowania offline. QSX nadal
+ogranicza całą VM, a profil agenta pozostaje niezależny. Nie wolno przedstawiać
+takiego obrazu jako natywnej kompilacji Sage/Lean na musl.
+
+**Wariant Docker nie jest jeszcze zaimplementowany ani przetestowany.**
+Jest zaakceptowaną ścieżką lokalnej kontynuacji, nie działającą funkcją tej
+receptury. Jego większy rozmiar trzeba zmierzyć po rzeczywistej budowie.

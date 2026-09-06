@@ -34,3 +34,7 @@ i Lean 4 są podstawą. Dodajemy taką recepturę źródłową obok lekkich przy
 Nie powiększa ona każdego obrazu. Jej ciężka kompilacja i odbiór na Alpine
 pozostają lokalne; sam plik receptury nie oznacza zaliczonej integracji tych
 narzędzi. Pozostałe zestawy i właściwe badania powstaną później.
+
+Operator dopuścił wariant zapasowy: gdy natywna kompilacja narzędzi na Alpine
+będzie na tym etapie przeszkodą, osobna cięższa receptura może uruchamiać je
+w Dockerze wewnątrz VM Alpine. Ten wariant nie jest jeszcze zaimplementowany.
