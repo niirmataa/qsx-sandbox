@@ -384,6 +384,94 @@ def test_guest_outbox_collection_is_idempotent_and_cannot_claim_authority(
     assert first[0]["execution_status"] == "PASS"
 
 
+def test_guest_outbox_correction_survives_complete_export_path(
+    memory: ResearchMemory, tmp_path: Path
+) -> None:
+    outbox = tmp_path / "outbox-correction"
+    outbox.mkdir()
+    (outbox / "01-observation.json").write_text(
+        json.dumps({
+            "operation_id": "guest-local-1", "event_type": "research",
+            "summary": "Finite search appeared negative", "execution_status": "PASS",
+            "applicability": "lineage",
+        })
+    )
+    original = memory.collect_outbox("task", outbox)[0]
+    (outbox / "02-correction.json").write_text(
+        json.dumps({
+            "operation_id": "guest-local-2", "event_type": "correction",
+            "summary": "Search bound was wrong", "execution_status": "PASS",
+            "applicability": "lineage", "supersedes": original["event_id"],
+        })
+    )
+    collected = memory.collect_outbox("task", outbox)
+    correction = next(record for record in collected if record["event_type"] == "correction")
+    assert correction["supersedes"] == original["event_id"]
+    assert correction["provenance"] == "GUEST_REPORTED"
+    memory_view = (memory.root / "views/task/MEMORY.md").read_text()
+    assert "HISTORICAL_LINEAGE;CORRECTS:" in memory_view
+    bundle = tmp_path / "correction-bundle"
+    memory.export_bundle("task", bundle)
+    checked = memory.check_bundle("task", bundle)
+    assert checked["ready"] is True
+    assert "CORRECTS:" in (bundle / "MEMORY.md").read_text()
+    assert len(memory.collect_outbox("task", outbox)) == 2
+
+    foreign = memory.append(kind="research", task_id="task-1", summary="foreign", status="PASS")
+    (outbox / "03-foreign.json").write_text(json.dumps({
+        "operation_id": "guest-local-3", "event_type": "correction", "summary": "invalid",
+        "supersedes": foreign["event_id"],
+    }))
+    with pytest.raises(QSXError, match="another project or task"):
+        memory.collect_outbox("task", outbox)
+
+
+def test_missing_and_corrupt_required_evidence_are_not_ready(
+    memory: ResearchMemory, tmp_path: Path
+) -> None:
+    artifact = tmp_path / "evidence.bin"
+    artifact.write_bytes(b"evidence")
+    reference = memory.add_artifact("task", artifact, "application/octet-stream")
+    memory.append(kind="evidence", task_id="task", summary="required evidence", status="PASS",
+                  evidence_refs=[str(reference["artifact_id"])])
+    stored = memory.artifacts / str(reference["sha256"])
+    stored.unlink()
+    missing = tmp_path / "missing-evidence"
+    memory.export_bundle("task", missing)
+    result = memory.check_bundle("task", missing)
+    assert result["integrity"] == "PASS"
+    assert result["completeness"] == "FAIL" and result["ready"] is False
+    assert "required evidence file missing" in " ".join(result["reasons"])
+
+    stored.write_bytes(b"wrong")
+    corrupt = tmp_path / "corrupt-evidence"
+    memory.export_bundle("task", corrupt)
+    result = memory.check_bundle("task", corrupt)
+    assert result["integrity"] == "PASS"
+    assert result["completeness"] == "FAIL" and result["ready"] is False
+    assert "required evidence content mismatch" in " ".join(result["reasons"])
+
+
+def test_exported_record_hash_and_revision_are_recomputed(
+    memory: ResearchMemory, tmp_path: Path
+) -> None:
+    memory.append(kind="research", task_id="task", summary="bound record", status="PASS")
+    bundle = tmp_path / "record-revision"
+    memory.export_bundle("task", bundle)
+    event_path = next((bundle / "events").glob("*.json"))
+    record = json.loads(event_path.read_text())
+    record["payload"]["summary"] = "rewritten with retained declared hash"
+    event_path.write_text(json.dumps(record, sort_keys=True) + "\n")
+    (bundle / "events.jsonl").write_text(json.dumps(record, sort_keys=True) + "\n")
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"] = memory_module._file_inventory(bundle)
+    atomic_json(manifest_path, manifest)
+    result = memory.check_bundle("task", bundle)
+    assert result["integrity"] == "FAIL" and result["ready"] is False
+    assert "event record SHA-256 mismatch" in " ".join(result["reasons"])
+
+
 def test_secret_like_memory_and_credential_artifact_are_rejected(
     memory: ResearchMemory, tmp_path: Path
 ) -> None:

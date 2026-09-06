@@ -206,8 +206,12 @@ class ResearchMemory:
                 for key in ("input_sha256", "output_sha256")
             ):
                 raise QSXError("independent checking metadata values are invalid")
-        if supersedes and not self.get(supersedes):
-            raise QSXError("superseded event does not exist")
+        if supersedes:
+            target = self.get(supersedes)
+            if not target:
+                raise QSXError("superseded event does not exist")
+            if target.get("project_id") != self.project_id or target.get("task_id") != task_id:
+                raise QSXError("superseded event belongs to another project or task")
         if operation_id and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", operation_id):
             raise QSXError("invalid operation ID")
         request: dict[str, object] = {
@@ -673,6 +677,9 @@ class ResearchMemory:
                     claim_type=str(report.get("claim_type", "UNANNOTATED")),
                     step_id=str(report["step_id"]) if report.get("step_id") else None,
                     applicability=str(report.get("applicability", "unknown")),
+                    supersedes=(
+                        str(report["supersedes"]) if report.get("supersedes") is not None else None
+                    ),
                 )
             )
         return collected
@@ -719,16 +726,14 @@ class ResearchMemory:
                             (ref,),
                         ).fetchone()
                         stored = Path(row[4]) if row else None
-                        if (
-                            not row
-                            or row[0] != task_id
-                            or stored is None
-                            or not stored.is_file()
-                            or stored.stat().st_size != row[2]
-                            or sha256(stored) != row[3]
-                        ):
+                        if not row or row[0] != task_id or stored is None or not stored.is_file():
                             artifact_manifests.append(
                                 {"artifact_id": ref, "availability": "MISSING"}
+                            )
+                            continue
+                        if stored.stat().st_size != row[2] or sha256(stored) != row[3]:
+                            artifact_manifests.append(
+                                {"artifact_id": ref, "availability": "CORRUPT"}
                             )
                             continue
                         shutil.copy2(stored, artifact_dir / row[3])
@@ -772,14 +777,21 @@ class ResearchMemory:
                 "reasons": ["manifest invalid"],
             }
         reasons = _verify_file_inventory(bundle, manifest.get("files"))
-        reasons.extend(_verify_event_export(bundle, task_id))
+        event_reasons, exported_records = _verify_event_export(bundle, task_id, self.project_id)
+        reasons.extend(event_reasons)
         integrity = "PASS" if not reasons else "FAIL"
+        completeness_reasons = _verify_evidence_completeness(bundle, manifest, exported_records)
+        completeness = "PASS" if not completeness_reasons else "FAIL"
         task_records, global_sequence, global_head = self._snapshot(task_id)
         revision = _task_revision(task_records)
         freshness_reasons = []
         if manifest.get("project_id") != self.project_id or manifest.get("task_id") != task_id:
             freshness_reasons.append("project/task mismatch")
-        if manifest.get("task_revision") != revision:
+        exported_revision = _task_revision(exported_records) if not event_reasons else None
+        if exported_revision is not None and manifest.get("task_revision") != exported_revision:
+            reasons.append("manifest task revision does not describe exported records")
+            integrity = "FAIL"
+        if exported_revision != revision:
             freshness_reasons.append("task revision changed")
         if manifest.get("active_state") != self.active_state():
             freshness_reasons.append("observed workspace/checkpoint state changed")
@@ -794,10 +806,11 @@ class ResearchMemory:
         )
         return {
             "integrity": integrity,
+            "completeness": completeness,
             "freshness": freshness,
             "authenticity": "NOT_ESTABLISHED",
-            "ready": integrity == "PASS" and freshness == "CURRENT",
-            "reasons": reasons + freshness_reasons,
+            "ready": integrity == "PASS" and completeness == "PASS" and freshness == "CURRENT",
+            "reasons": reasons + completeness_reasons + freshness_reasons,
             "controller_global_read_point": {
                 "sequence": global_sequence,
                 "head_sha256": global_head,
@@ -1043,19 +1056,22 @@ def _knowledge_state(
     record: dict[str, object], superseded_by: dict[str, list[str]], active_lineage: object
 ) -> str:
     event_id = str(record["event_id"])
-    if event_id in superseded_by:
-        return "SUPERSEDED_BY:" + ",".join(superseded_by[event_id])
-    if record.get("supersedes"):
-        return f"CORRECTS:{record['supersedes']}"
     payload = cast(dict[str, object], record["payload"])
     applicability = str(payload.get("applicability", "unknown"))
     if applicability == "general":
-        return "ACTIVE_GENERAL"
-    if applicability == "unknown":
-        return "UNKNOWN_SCOPE"
-    if record.get("lineage_id") != active_lineage:
-        return "HISTORICAL_LINEAGE"
-    return "ACTIVE_LINEAGE"
+        scope = "ACTIVE_GENERAL"
+    elif applicability == "unknown":
+        scope = "UNKNOWN_SCOPE"
+    elif record.get("lineage_id") != active_lineage:
+        scope = "HISTORICAL_LINEAGE"
+    else:
+        scope = "ACTIVE_LINEAGE"
+    relationships = []
+    if event_id in superseded_by:
+        relationships.append("SUPERSEDED_BY:" + ",".join(superseded_by[event_id]))
+    if record.get("supersedes"):
+        relationships.append(f"CORRECTS:{record['supersedes']}")
+    return scope + (";" + ";".join(relationships) if relationships else "")
 
 
 def _annotated_lines(records: list[dict[str, object]], state: dict[str, object]) -> list[str]:
@@ -1147,20 +1163,86 @@ def _verify_file_inventory(root: Path, supplied: object) -> list[str]:
     return [] if actual == supplied else ["declared file set, size, or SHA-256 differs"]
 
 
-def _verify_event_export(root: Path, task_id: str) -> list[str]:
+def _verify_event_export(
+    root: Path, task_id: str, project_id: str
+) -> tuple[list[str], list[dict[str, object]]]:
     journal = root / "events.jsonl"
     events = root / "events"
     if not journal.is_file() or not events.is_dir():
-        return ["events.jsonl or events directory missing"]
+        return ["events.jsonl or events directory missing"], []
     try:
-        jsonl = [json.loads(line) for line in journal.read_text().splitlines()]
-        files = [json.loads(path.read_text()) for path in sorted(events.glob("*.json"))]
-    except (OSError, json.JSONDecodeError):
-        return ["event representation is invalid JSON"]
-    if any(record.get("task_id") != task_id for record in jsonl + files):
-        return ["event from another task is present"]
+        jsonl = [cast(dict[str, object], json.loads(line)) for line in journal.read_text().splitlines()]
+        paths = sorted(events.glob("*.json"))
+        files = [cast(dict[str, object], json.loads(path.read_text())) for path in paths]
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ["event representation is invalid JSON"], []
+    reasons: list[str] = []
+    required = {"event_id", "project_id", "task_id", "controller_sequence", "record_sha256"}
+    if any(required - record.keys() for record in jsonl + files):
+        reasons.append("event record is missing mandatory fields")
+    if any(
+        record.get("task_id") != task_id or record.get("project_id") != project_id
+        for record in jsonl + files
+    ):
+        reasons.append("event from another project or task is present")
+    ids = [record.get("event_id") for record in jsonl]
+    if len(ids) != len(set(ids)):
+        reasons.append("duplicate event ID is present")
+    expected_names = {f"{record.get('event_id')}.json" for record in files}
+    if {path.name for path in paths} != expected_names:
+        reasons.append("event filename does not match event ID")
     by_id_jsonl = {record.get("event_id"): record for record in jsonl}
     by_id_files = {record.get("event_id"): record for record in files}
     if by_id_jsonl != by_id_files or len(jsonl) != len(files):
-        return ["events JSON files differ semantically from events.jsonl"]
-    return []
+        reasons.append("events JSON files differ semantically from events.jsonl")
+    sequences = [record.get("controller_sequence") for record in jsonl]
+    if sequences != sorted(sequences, key=lambda value: int(cast(int, value))):
+        reasons.append("events are not in controller sequence order")
+    for record in jsonl:
+        supplied = record.get("record_sha256")
+        unhashed = dict(record)
+        unhashed.pop("record_sha256", None)
+        calculated = hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if supplied != calculated:
+            reasons.append(f"event record SHA-256 mismatch: {record.get('event_id')}")
+    return reasons, jsonl
+
+
+def _verify_evidence_completeness(
+    root: Path, manifest: dict[str, object], records: list[dict[str, object]]
+) -> list[str]:
+    declared = manifest.get("artifacts")
+    if not isinstance(declared, list):
+        return ["artifact manifest missing or invalid"]
+    entries = {
+        entry.get("artifact_id"): entry
+        for entry in declared
+        if isinstance(entry, dict) and isinstance(entry.get("artifact_id"), str)
+    }
+    reasons: list[str] = []
+    referenced = {
+        str(ref)
+        for record in records
+        for ref in cast(list[object], record.get("evidence_refs", []))
+    }
+    for reference in sorted(referenced):
+        entry = entries.get(reference)
+        if entry is None:
+            reasons.append(f"required evidence manifest missing: {reference}")
+        elif entry.get("availability") == "MISSING":
+            reasons.append(f"required evidence file missing: {reference}")
+        elif entry.get("availability") == "CORRUPT":
+            reasons.append(f"required evidence content mismatch: {reference}")
+        elif entry.get("availability") != "PRESENT":
+            reasons.append(f"required evidence availability invalid: {reference}")
+        else:
+            digest = entry.get("sha256")
+            size = entry.get("size")
+            artifact = root / "artifacts" / str(digest)
+            if not artifact.is_file():
+                reasons.append(f"required evidence file missing: {reference}")
+            elif artifact.stat().st_size != size or sha256(artifact) != digest:
+                reasons.append(f"required evidence content mismatch: {reference}")
+    return reasons
