@@ -1,5 +1,16 @@
 # Research Memory RM01–RM08 closure
 
+## Published-revision verification rerun (2026-09-06)
+
+GitHub PR #1 was reported by the operator at `5752d5f14d4a41dac027b6c930be3834eec530f7`.
+The platform materialized the same submitted change set locally as commit
+`bfd63dc25f934771c27a77e2fd56167472c42c4e`, tree
+`a929d79befe81594b66e7c40240c6dc166c9b46e`. The published commit object is not
+present in this checkout, no remote is configured, and an unauthenticated GitHub
+read returned HTTP 401. Consequently commit/tree equality with the published SHA
+was **NOT ESTABLISHED**; the gates below were rerun against the stated local tree.
+No F01–F03 implementation was repeated in this verification pass.
+
 Tested code revision: `419e42f10e6924fb016c705a1d03db0c4107fbeb` (tree `0db6111ac6aff4ea2fc7a9fa3563630ca30c39cd`).
 The final documentation commit is intentionally later; its HEAD is reported in the delivery message rather than recursively embedded here. Evidence layer is Codex Cloud controller integration with synthetic files, real SQLite/Git and offline qemu-img where applicable—not a real VM acceptance.
 
