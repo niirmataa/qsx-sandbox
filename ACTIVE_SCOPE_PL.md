@@ -38,3 +38,7 @@ narzędzi. Pozostałe zestawy i właściwe badania powstaną później.
 Operator dopuścił wariant zapasowy: gdy natywna kompilacja narzędzi na Alpine
 będzie na tym etapie przeszkodą, osobna cięższa receptura może uruchamiać je
 w Dockerze wewnątrz VM Alpine. Ten wariant nie jest jeszcze zaimplementowany.
+
+Priorytetem jest działający, odtwarzalny warsztat z właściwymi narzędziami.
+Rozmiar obrazu jest pomiarem zależnym od zadania, a nie powodem rezygnacji
+z potrzebnego SageMath, Lean lub ich zależności.
