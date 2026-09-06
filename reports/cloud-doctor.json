@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "scope": "current-host-read-only",
+  "python": "3.12.13",
+  "system": "Linux",
+  "architecture": "x86_64",
+  "filesystem": {
+    "cwd_writable": true,
+    "free_bytes": 31699243008
+  },
+  "tools": {
+    "git": {
+      "status": "PASS",
+      "detail": "git version 2.43.0"
+    },
+    "qemu_img": {
+      "status": "PASS",
+      "detail": "qemu-img version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+    },
+    "qemu": {
+      "status": "PASS",
+      "detail": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+    },
+    "libvirt_client": {
+      "status": "PASS",
+      "detail": "10.0.0"
+    }
+  },
+  "kvm": {
+    "status": "BLOCKED",
+    "detail": "/dev/kvm absent"
+  },
+  "host_network_isolation": {
+    "status": "NOT_RUN"
+  },
+  "host_acceptance": {
+    "status": "NOT_RUN"
+  }
+}

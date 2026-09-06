@@ -1,83 +1,40 @@
-# QSX — pakiet startowy zadania Codex Cloud
+# QSX MVP
 
-To specyfikacja, instrukcje agenta i skrypty przygotowania narzędzi developerskich.
-Nie zawiera zaimplementowanego QSX ani obrazu VM. Nie utworzono środowiska w Twoim
-koncie i nie wykonano instalacji na docelowym laptopie.
+QSX is a conservative Python 3.12 controller for one `MathResearch` Ubuntu 24.04 libvirt/QEMU/KVM VM. Cloud validation covers Git, offline images, provisioning media, schemas, wheel installation, and adapter contracts—not KVM boot or network isolation.
 
-## Użycie
+## Reproducible developer setup
 
-Umieść zawartość tego katalogu w głównym katalogu osobnego, prywatnego repozytorium
-infrastruktury QSX i zatwierdź pliki. Nie trzeba przenosić repo FT1536. W Codex
-Cloud wybierz to repo i gałąź zawierającą pakiet; nie tylko załącznik z rozmowy.
-W istniejącym repo połącz AGENTS.md i .gitignore, zamiast nadpisywać je bez przeglądu.
+`requirements-dev.lock` pins the complete CPython 3.12/Linux x86_64 developer dependency set with wheel hashes. `codex/setup.sh` installs it with `--require-hashes`. Runtime is standard-library only and the repository includes a dependency-free PEP 517 wheel backend.
+The lock was reproduced in a fresh venv with downloaded setup-phase wheels, `--no-index --require-hashes`, and `pip check`; wheel acceptance itself also runs without network access.
 
-Codex pobiera wybraną rewizję repo i wykonuje konfigurację środowiska [C1].
-Instrukcje repozytorium umieszczamy w AGENTS.md [C3].
+```bash
+QSX_BUILD_CONTEXT=codex-cloud codex/setup.sh
+make test-cloud lint typecheck security-audit install-wheel
+```
 
-## Ustawienia środowiska — propozycja QSX
+## Operator flow
 
-| Pole | Wartość |
-|---|---|
-| Nazwa | QSX-Builder |
-| Repo/rewizja | Prywatne repo QSX, branch lub SHA zawierający ten pakiet |
-| Obraz | Standardowy `universal`; zweryfikuj Linux z apt-get |
-| Runtime | Python 3.12 jako wersja referencyjna |
-| Zmienna środowiskowa | `QSX_BUILD_CONTEXT=codex-cloud` |
-| Setup script | `bash codex/setup.sh` |
-| Maintenance script | `bash codex/maintenance.sh` |
-| Agent internet access | Off na start |
-| Secrets | Puste dla tego zadania |
+Copy `config/qsx.example.toml`, replace the base-image checksum with the checksum from the official Ubuntu release manifest, and point `base_image.path` at the locally staged image. QSX never downloads an image at runtime.
 
-Setup korzysta z sieci do zależności; zmienne z samego `export` w setup nie
-przechodzą do sesji agenta [C1]. Dlatego znacznik kontekstu ustaw w panelu,
-a narzędzia Python uruchamiaj przez `.venv/bin/python`.
+```bash
+qsx doctor > doctor.json
+qsx --config qsx.toml create task-001    # import, independent disk, ISO, define
+qsx --config qsx.toml start              # KVM only; first boot imports then powers off
+qsx --config qsx.toml status
+qsx --config qsx.toml finalize-import task-001
+qsx --config qsx.toml start              # agent works only in guest workspace
+qsx --config qsx.toml shutdown
+qsx --config qsx.toml checkpoint task-001
+qsx --config qsx.toml rollback CHECKPOINT_ID
+qsx --config qsx.toml export task-001 /new/review-destination
+```
 
-Skrypt instaluje pakiety w runnerze, więc jego treść wymaga przeglądu. Nie wykonuj
-go na laptopie produkcyjnym. Potrzebne są standardowe uprawnienia instalacji
-pakietów w środowisku; ich brak ma zakończyć setup błędem, nie próbą obejścia.
-Nie instalujemy demona libvirt, nie uruchamiamy sieci VM i nie otwieramy portów.
+Export and checkpoint inspect the stopped guest via read-only libguestfs. Export creates a fresh directory containing Git history, baseline diff, and task metadata. There is no Docker dependency, writable source mount, credential provisioning, push, merge, or arbitrary host-shell API.
 
-Pierwszy setup jest bootstrapem bez przypiętych narzędzi Python: ich wersje
-zostają zapisane. Agent ma potem dostarczyć kompletny lockfile z hashami i
-sprawdzić powtarzalny setup. Skrypt użyje locka, gdy będzie już w repo.
-Nie twierdzimy, że sam manifest wersji zapewnia odtwarzalność.
+## Research Memory
 
-Po zmianie zależności powtórz setup/reset cache przed kolejnym zadaniem.
-Maintenance odmawia pracy przy innym hashu lockfile.
+Research Memory persists outside the VM and survives rollback. `memory-record` records research/evidence with explicit provenance, `handoff` records continuity, and `memory-render` regenerates CHANGELOG, MEMORY, LIFE, and CONTEXT. See `docs/RESEARCH_MEMORY.md`. Checkpoint lifecycle events are linked automatically; failed and NOT_RUN results remain visible.
 
-## Dostęp do dokumentacji
+The transactional SQLite ledger is authoritative; task-scoped JSONL and generated views are portable outputs. Use `history-collect/list/reconcile` for stopped-guest intake and recovery, and `context-build/context-check` for revision-bound handoff bundles. Local hash-chain consistency is not authenticity, completeness, trusted time, or proof of a scientific claim.
 
-Domyślnie agent pozostaje bez internetu. Gdy potrzebuje aktualnej dokumentacji,
-możesz dopuścić tylko wymagane domeny dokumentacyjne i metody GET/HEAD, zamiast
-opcji All/Common dependencies [C2]. Kandydaci: qemu.org, www.qemu.org, libvirt.org,
-git-scm.com, developers.openai.com, learn.chatgpt.com. Sprawdź faktyczne
-przekierowania; nie rozszerzaj listy na cały internet. Ograniczenie metod HTTP
-nie jest gwarancją, że żadne dane nie mogą zostać wysłane w zapytaniu.
-
-Polityka internetowa runnera nie jest dowodem działania przyszłej polityki
-`offline/openai` w MathResearch. To dwa osobne środowiska.
-
-## Zadanie
-
-Wklej tekst z START_TASK.txt. Pierwszym celem jest implementacja i testy w chmurze;
-końcowa konfiguracja sprzętu oraz odbiór bezpieczeństwa pozostają lokalne.
-
-## Co zostało sprawdzone w tym pakiecie
-
-Patrz PREPARATION_CHECKS.md. Skrypty setup/maintenance nie zostały uruchomione
-w Twoim Codex Cloud. Gotowość środowiska trzeba potwierdzić w jego logu setup.
-
-## Pliki
-
-- `docs/QSX_MVP_AGENT_TASK.md`: pełna specyfikacja produktu z trybem CLOUD_BUILD.
-- `docs/CODEX_CLOUD.md`: macierz testów i rozdział budowy od lokalnego odbioru.
-- `AGENTS.md`: krótkie instrukcje obowiązujące przy implementacji.
-- `codex/setup.sh`, `codex/maintenance.sh`, `codex/capabilities.py`: przygotowanie
-  narzędzi i odczytujący raport runnera, nie instalator QSX.
-- `START_TASK.txt`: polecenie dla agenta.
-
-[C1] `https://developers.openai.com/codex/cloud/environments`
-
-[C2] `https://developers.openai.com/codex/cloud/internet-access`
-
-[C3] `https://developers.openai.com/codex/guides/agents-md/`
+Portable bundles include full linked event records and a versioned exact-file manifest. Bundle checking reports integrity, task freshness, authenticity, and readiness separately. Research views use immutable generations selected by an atomic pointer, and idempotent operation IDs reject changed request content rather than silently discarding it. The RM01–RM08 test/evidence matrix is in `reports/RM_CLOSURE.md`.
