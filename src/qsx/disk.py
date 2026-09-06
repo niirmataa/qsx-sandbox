@@ -134,7 +134,15 @@ class Checkpoints:
         run(["qemu-img", "check", "-f", "qcow2", str(source)])
         memory = ResearchMemory(self.config)
         operation_id = operation_id or f"rollback:{uuid.uuid4()}"
-        prior = memory.begin_operation(operation_id, str(manifest["task_id"]), "rollback")
+        operation_task = str(manifest["task_id"])
+        operation_parameters = {
+            "checkpoint_id": checkpoint_id,
+            "preserve_current": preserve_current,
+            "disk": str(self.config.disk),
+        }
+        prior = memory.begin_operation(
+            operation_id, operation_task, "rollback", operation_parameters
+        )
         if prior == "COMPLETED":
             return
         replaced = False
@@ -173,7 +181,14 @@ class Checkpoints:
                 checkpoint_id=checkpoint_id,
                 operation_id=operation_id,
             )
-            memory.finish_operation(operation_id, "COMPLETED")
+            memory.finish_operation(
+                operation_id, "COMPLETED", task_id=operation_task, kind="rollback"
+            )
         except BaseException:
-            memory.finish_operation(operation_id, "RECONCILE" if replaced else "FAILED")
+            memory.finish_operation(
+                operation_id,
+                "RECONCILE" if replaced else "FAILED",
+                task_id=operation_task,
+                kind="rollback",
+            )
             raise

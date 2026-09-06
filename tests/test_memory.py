@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+import qsx.memory as memory_module
 from qsx.config import Config
 from qsx.errors import QSXError
 from qsx.memory import ResearchMemory
+from qsx.util import atomic_json
 from qsx.workspace import import_project
 
 
@@ -121,11 +125,24 @@ def test_full_record_lookup_idempotency_and_correction(memory: ResearchMemory) -
     duplicate = memory.append(
         kind="research",
         task_id="task",
-        summary="ignored duplicate payload",
-        status="FAIL",
+        summary="Numerical search",
+        details="method=grid; seed=11; limitation=finite range",
+        status="PASS",
+        origin="agent",
+        evidence="agent_reported",
         operation_id="collect:guest-note-1",
+        claim_type="NUMERICAL_OBSERVATION",
+        applicability="integers 1..100",
     )
     assert duplicate["event_id"] == first["event_id"]
+    with pytest.raises(QSXError, match="operation ID conflict"):
+        memory.append(
+            kind="research",
+            task_id="task",
+            summary="changed payload must not disappear",
+            status="FAIL",
+            operation_id="collect:guest-note-1",
+        )
     assert memory.get(str(first["event_id"])) == first
     correction = memory.append(
         kind="correction",
@@ -288,8 +305,14 @@ def test_context_bundle_staleness_and_project_scoped_artifact_export(
     )
     bundle = tmp_path / "bundle"
     memory.export_bundle("task", bundle)
-    assert memory.check_bundle("task", bundle)["status"] == "CURRENT"
+    assert memory.check_bundle("task", bundle)["freshness"] == "CURRENT"
+    assert memory.check_bundle("task", bundle)["integrity"] == "PASS"
     assert (bundle / "artifacts" / str(reference["sha256"])).read_text() == artifact.read_text()
+    damaged_artifact = tmp_path / "damaged-artifact-bundle"
+    shutil.copytree(bundle, damaged_artifact)
+    (damaged_artifact / "artifacts" / str(reference["sha256"])).write_text("tampered")
+    damaged_result = memory.check_bundle("task", damaged_artifact)
+    assert damaged_result["integrity"] == "FAIL" and damaged_result["ready"] is False
     memory.append(
         kind="research",
         task_id="task",
@@ -297,7 +320,7 @@ def test_context_bundle_staleness_and_project_scoped_artifact_export(
         status="NOT_RUN",
         operation_id="note:new-revision",
     )
-    assert memory.check_bundle("task", bundle)["status"] == "STALE"
+    assert memory.check_bundle("task", bundle)["freshness"] == "STALE"
 
 
 def test_recover_portable_records_reports_missing_artifacts(
@@ -402,10 +425,326 @@ def test_retry_after_render_failure_republishes_without_duplicate(
     retried = memory.append(
         kind="research",
         task_id="task",
-        summary="same operation retry",
+        summary="Persist before render",
         status="NOT_RUN",
         operation_id="note:render-retry",
     )
     assert len(memory.records()) == 1
     assert (memory.root / "views/task/CONTEXT.md").is_file()
     assert retried["payload"]["summary"] == "Persist before render"
+
+
+def test_same_local_operation_id_is_scoped_by_task(memory: ResearchMemory) -> None:
+    first = memory.append(
+        kind="research",
+        task_id="task",
+        summary="task A note",
+        status="PASS",
+        operation_id="local-1",
+    )
+    second = memory.append(
+        kind="research",
+        task_id="task-1",
+        summary="task B note",
+        status="PASS",
+        operation_id="local-1",
+    )
+    assert first["event_id"] != second["event_id"]
+
+
+@pytest.mark.parametrize(
+    "verification",
+    [
+        None,
+        {"checker": "only"},
+        {
+            "checker": " ",
+            "checker_version": "1",
+            "input_sha256": "a" * 64,
+            "output_sha256": "b" * 64,
+        },
+        {
+            "checker": "checker",
+            "checker_version": 1,
+            "input_sha256": "a" * 64,
+            "output_sha256": "b" * 64,
+        },
+        {
+            "checker": "checker",
+            "checker_version": "1",
+            "input_sha256": "bad",
+            "output_sha256": "b" * 64,
+        },
+    ],
+)
+def test_independent_verification_rejects_incomplete_values(
+    memory: ResearchMemory, verification: object
+) -> None:
+    with pytest.raises(QSXError, match="independent checking"):
+        memory.append(
+            kind="evidence",
+            task_id="task",
+            summary="claimed independent result",
+            status="PASS",
+            provenance="INDEPENDENTLY_CHECKED",
+            verification=verification,  # type: ignore[arg-type]
+        )
+
+
+def test_export_contains_complete_linked_events_and_detects_damage(
+    memory: ResearchMemory, tmp_path: Path
+) -> None:
+    original = memory.append(
+        kind="research",
+        task_id="task",
+        summary="Original result",
+        details="method=synthetic; limitation=bounded",
+        status="FAIL",
+        operation_id="note:original",
+        applicability="lineage-specific",
+    )
+    correction = memory.append(
+        kind="correction",
+        task_id="task",
+        summary="Original result withdrawn",
+        details="The bounded method used the wrong limit.",
+        status="PASS",
+        operation_id="note:correction",
+        supersedes=str(original["event_id"]),
+        applicability="general",
+    )
+    bundle = tmp_path / "bundle"
+    memory.export_bundle("task", bundle)
+    exported = {
+        json.loads(path.read_text())["event_id"]: json.loads(path.read_text())
+        for path in (bundle / "events").glob("*.json")
+    }
+    jsonl = {
+        record["event_id"]: record
+        for record in map(json.loads, (bundle / "events.jsonl").read_text().splitlines())
+    }
+    assert exported == jsonl
+    assert set(exported) == {original["event_id"], correction["event_id"]}
+    assert "limitation=bounded" in (bundle / "events" / f"{original['event_id']}.json").read_text()
+    for markdown in ("CHANGELOG.md", "MEMORY.md", "CONTEXT.md"):
+        text = (bundle / markdown).read_text()
+        for event_id in exported:
+            if event_id in text:
+                assert (bundle / "events" / f"{event_id}.json").is_file()
+    assert memory.check_bundle("task", bundle)["ready"] is True
+
+    damaged = tmp_path / "damaged"
+    shutil.copytree(bundle, damaged)
+    (damaged / "MEMORY.md").write_text("tampered")
+    result = memory.check_bundle("task", damaged)
+    assert result["integrity"] == "FAIL" and result["ready"] is False
+
+    missing = tmp_path / "missing"
+    shutil.copytree(bundle, missing)
+    next((missing / "events").glob("*.json")).unlink()
+    assert memory.check_bundle("task", missing)["integrity"] == "FAIL"
+
+    semantic = tmp_path / "semantic"
+    shutil.copytree(bundle, semantic)
+    event_path = next((semantic / "events").glob("*.json"))
+    event_data = json.loads(event_path.read_text())
+    event_data["payload"]["details"] = "does not match JSONL"
+    event_path.write_text(json.dumps(event_data, indent=2, sort_keys=True) + "\n")
+    manifest = json.loads((semantic / "manifest.json").read_text())
+    entry = next(
+        item
+        for item in manifest["files"]
+        if item["path"] == event_path.relative_to(semantic).as_posix()
+    )
+    entry["size"] = event_path.stat().st_size
+    entry["sha256"] = hashlib.sha256(event_path.read_bytes()).hexdigest()
+    (semantic / "manifest.json").write_text(json.dumps(manifest))
+    assert "events JSON files differ" in " ".join(memory.check_bundle("task", semantic)["reasons"])
+
+    extra = tmp_path / "extra"
+    shutil.copytree(bundle, extra)
+    (extra / "unexpected.txt").write_text("unexpected")
+    assert memory.check_bundle("task", extra)["integrity"] == "FAIL"
+
+
+def test_task_revision_ignores_unrelated_task_records(
+    memory: ResearchMemory, tmp_path: Path
+) -> None:
+    memory.append(kind="research", task_id="task", summary="A1", status="PASS", operation_id="A1")
+    memory.append(kind="research", task_id="task-1", summary="B1", status="PASS", operation_id="B1")
+    bundle = tmp_path / "a"
+    memory.export_bundle("task", bundle)
+    assert memory.check_bundle("task", bundle)["freshness"] == "CURRENT"
+    memory.append(kind="research", task_id="task-1", summary="B2", status="PASS", operation_id="B2")
+    assert memory.check_bundle("task", bundle)["freshness"] == "CURRENT"
+    memory.append(kind="research", task_id="task", summary="A2", status="PASS", operation_id="A2")
+    result = memory.check_bundle("task", bundle)
+    assert result["integrity"] == "PASS" and result["freshness"] == "STALE"
+
+
+def test_context_budget_includes_footer_and_correction_unit(memory: ResearchMemory) -> None:
+    original = memory.append(
+        kind="research",
+        task_id="task",
+        summary="Niepoprawny lemat " + "ą" * 20,
+        status="FAIL",
+        operation_id="old",
+    )
+    correction = memory.append(
+        kind="correction",
+        task_id="task",
+        summary="Lemat wycofany",
+        status="PASS",
+        operation_id="correction",
+        supersedes=str(original["event_id"]),
+        applicability="general",
+    )
+    for index in range(10):
+        memory.append(
+            kind="research",
+            task_id="task",
+            summary=f"filler-{index}-" + "ż" * 30,
+            status="PASS",
+            operation_id=f"filler:{index}",
+        )
+    context = memory.render("task", budget=1500)["CONTEXT.md"].read_text()
+    assert len(context.encode("utf-8")) <= 1500
+    assert str(original["event_id"]) in context and str(correction["event_id"]) in context
+    assert "SUPERSEDED_BY" in context and "CORRECTS" in context
+
+
+def test_empty_context_budget_boundary_is_measured_in_utf8_bytes(memory: ResearchMemory) -> None:
+    context = memory.render("task-1")["CONTEXT.md"].read_text()
+    exact = len(context.encode("utf-8"))
+    rebuilt = memory.render("task-1", budget=exact)["CONTEXT.md"].read_text()
+    assert len(rebuilt.encode("utf-8")) <= exact
+    with pytest.raises(QSXError, match="budget"):
+        memory.render("task-1", budget=100)
+
+
+def test_applicability_distinguishes_general_historical_and_unknown(
+    memory: ResearchMemory,
+) -> None:
+    task = memory._task("task")
+    memory.append(
+        kind="research",
+        task_id="task",
+        summary="General definition",
+        status="PASS",
+        operation_id="general",
+        applicability="general",
+    )
+    memory.append(
+        kind="research",
+        task_id="task",
+        summary="Code-dependent observation",
+        status="PASS",
+        operation_id="line",
+        applicability="this code lineage",
+    )
+    memory.append(
+        kind="research",
+        task_id="task",
+        summary="Unscoped note",
+        status="PASS",
+        operation_id="unknown",
+    )
+    memory.observe_workspace("task", (str(task["branch"]), "c" * 40, False, None, "d" * 64))
+    state = memory.active_state()
+    state["lineage_id"] = "new-lineage-after-rollback"
+    atomic_json(memory.config.state_dir / "checkpoint-state.json", state)
+    rendered = memory.render("task")["MEMORY.md"].read_text()
+    assert "ACTIVE_GENERAL" in rendered
+    assert "HISTORICAL_LINEAGE" in rendered
+    assert "UNKNOWN_SCOPE" in rendered
+
+
+def test_generation_pointer_survives_interrupted_publication(
+    memory: ResearchMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory.append(kind="research", task_id="task", summary="old", status="PASS", operation_id="old")
+    pointer = memory.root / "views/task"
+    old_target = pointer.resolve()
+    real_replace = memory_module.os.replace
+
+    def fail_pointer(source: object, destination: object) -> None:
+        if Path(destination) == pointer:
+            raise OSError("controlled pointer interruption")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(memory_module.os, "replace", fail_pointer)
+    with pytest.raises(OSError, match="pointer interruption"):
+        memory.append(
+            kind="research", task_id="task", summary="new", status="PASS", operation_id="new"
+        )
+    assert pointer.resolve() == old_target
+    assert (pointer / "manifest.json").is_file()
+    monkeypatch.setattr(memory_module.os, "replace", real_replace)
+    memory.append(kind="research", task_id="task", summary="new", status="PASS", operation_id="new")
+    assert pointer.resolve() != old_target
+
+
+def test_interruption_after_pointer_keeps_complete_new_generation(
+    memory: ResearchMemory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory.append(kind="research", task_id="task", summary="old", status="PASS", operation_id="old")
+    old_target = (memory.root / "views/task").resolve()
+    real_point = memory._point_current
+
+    def point_then_fail(task_id: str, generation: Path) -> None:
+        real_point(task_id, generation)
+        raise OSError("controlled post-pointer interruption")
+
+    monkeypatch.setattr(memory, "_point_current", point_then_fail)
+    with pytest.raises(OSError, match="post-pointer"):
+        memory.append(
+            kind="research", task_id="task", summary="new", status="PASS", operation_id="new"
+        )
+    new_target = (memory.root / "views/task").resolve()
+    assert new_target != old_target
+    assert all(
+        (new_target / name).is_file()
+        for name in ("CONTEXT.md", "MEMORY.md", "LIFE.md", "CHANGELOG.md", "manifest.json")
+    )
+
+
+def test_parallel_export_is_one_complete_historical_generation(
+    memory: ResearchMemory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory.append(
+        kind="research", task_id="task", summary="before", status="PASS", operation_id="before"
+    )
+    captured = threading.Event()
+    continue_export = threading.Event()
+    real_render = memory.render
+
+    def paused_render(task_id: str, budget: int = 12 * 1024) -> dict[str, Path]:
+        result = real_render(task_id, budget)
+        captured.set()
+        assert continue_export.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(memory, "render", paused_render)
+    destination = tmp_path / "parallel-bundle"
+    failure: list[BaseException] = []
+
+    def export() -> None:
+        try:
+            memory.export_bundle("task", destination)
+        except (OSError, QSXError) as exc:
+            failure.append(exc)
+
+    thread = threading.Thread(target=export)
+    thread.start()
+    assert captured.wait(timeout=5)
+    writer = ResearchMemory(memory.config)
+    writer.append(
+        kind="research", task_id="task", summary="after", status="PASS", operation_id="after"
+    )
+    continue_export.set()
+    thread.join(timeout=5)
+    assert not failure and not thread.is_alive()
+    result = memory.check_bundle("task", destination)
+    assert result["integrity"] == "PASS"
+    assert result["freshness"] == "STALE"
+    assert result["ready"] is False

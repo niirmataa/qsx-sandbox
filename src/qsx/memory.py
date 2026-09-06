@@ -55,6 +55,7 @@ class ResearchMemory:
         self.artifacts = self.root / "artifacts"
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._initialize()
+        self._migrate_idempotency_keys()
         self._migrate_legacy_tasks()
 
     def _project_id(self) -> str:
@@ -96,13 +97,19 @@ class ResearchMemory:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS events (
                   controller_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                  event_id TEXT NOT NULL UNIQUE, operation_id TEXT UNIQUE,
+                  event_id TEXT NOT NULL UNIQUE, operation_id TEXT,
                   task_id TEXT NOT NULL, record_json TEXT NOT NULL,
                   previous_sha256 TEXT NOT NULL, record_sha256 TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS idempotency (
+                  scope TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL,
+                  event_id TEXT NOT NULL REFERENCES events(event_id));
                 CREATE TABLE IF NOT EXISTS operations (
                   operation_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL,
                   state TEXT NOT NULL CHECK(state IN ('INTENT','COMPLETED','FAILED','RECONCILE')),
                   started_at TEXT NOT NULL, finished_at TEXT, detail TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS operation_keys (
+                  scope TEXT PRIMARY KEY, request_sha256 TEXT NOT NULL,
+                  internal_operation_id TEXT NOT NULL REFERENCES operations(operation_id));
                 CREATE TABLE IF NOT EXISTS artifacts (
                   artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, media_type TEXT NOT NULL,
                   size INTEGER NOT NULL, sha256 TEXT NOT NULL, stored_path TEXT NOT NULL);
@@ -114,6 +121,25 @@ class ResearchMemory:
         if not path.is_file():
             raise QSXError("memory task does not exist")
         return cast(dict[str, object], json.loads(path.read_text()))
+
+    def _migrate_idempotency_keys(self) -> None:
+        """Index schema-v2 request hashes without changing stored records or chain hashes."""
+        with self._transaction() as connection:
+            rows = connection.execute("SELECT event_id,record_json FROM events").fetchall()
+            for event_id, encoded in rows:
+                record = cast(dict[str, object], json.loads(encoded))
+                operation_id = record.get("operation_id")
+                request_sha256 = record.get("operation_request_sha256")
+                if not operation_id or not request_sha256:
+                    continue
+                scope = (
+                    f"{self.project_id}:{record['task_id']}:"
+                    f"{record.get('observed_source', 'legacy')}:{operation_id}"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO idempotency VALUES(?,?,?)",
+                    (scope, request_sha256, event_id),
+                )
 
     def append(
         self,
@@ -171,100 +197,177 @@ class ResearchMemory:
                 raise QSXError(
                     "independent checking requires checker/version and input/output digests"
                 )
+            if not all(
+                isinstance(verification[key], str) and verification[key].strip()
+                for key in ("checker", "checker_version")
+            ) or not all(
+                isinstance(verification[key], str)
+                and re.fullmatch(r"[a-f0-9]{64}", verification[key])
+                for key in ("input_sha256", "output_sha256")
+            ):
+                raise QSXError("independent checking metadata values are invalid")
         if supersedes and not self.get(supersedes):
             raise QSXError("superseded event does not exist")
         if operation_id and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", operation_id):
             raise QSXError("invalid operation ID")
-        if operation_id:
-            with self._connect() as connection:
-                existing = connection.execute(
-                    "SELECT record_json FROM events WHERE operation_id=?", (operation_id,)
-                ).fetchone()
-            if existing:
-                existing_record = cast(dict[str, object], json.loads(existing[0]))
-                self._publish_portable()
-                self.render(task_id)
-                return existing_record
+        request: dict[str, object] = {
+            "kind": kind,
+            "task_id": task_id,
+            "summary": summary.strip(),
+            "status": status,
+            "origin": origin,
+            "provenance": provenance,
+            "details": details,
+            "git_commit": git_commit,
+            "checkpoint_id": checkpoint_id,
+            "claim_type": claim_type,
+            "step_id": step_id,
+            "evidence_refs": refs,
+            "supersedes": supersedes,
+            "applicability": applicability,
+            "verification": verification or {},
+            "observed_source": observed_source,
+        }
+        request_sha256 = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        operation_scope = (
+            f"{self.project_id}:{task_id}:{observed_source}:{operation_id}"
+            if operation_id
+            else None
+        )
         with self._transaction() as connection:
-            if operation_id:
+            if operation_scope:
                 existing = connection.execute(
-                    "SELECT record_json FROM events WHERE operation_id=?", (operation_id,)
+                    "SELECT request_sha256,event_id FROM idempotency WHERE scope=?",
+                    (operation_scope,),
                 ).fetchone()
                 if existing:
-                    return cast(dict[str, object], json.loads(existing[0]))
-            last = connection.execute(
-                "SELECT record_sha256 FROM events ORDER BY controller_sequence DESC LIMIT 1"
-            ).fetchone()
-            previous = str(last[0]) if last else "0" * 64
-            sequence = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(controller_sequence),0)+1 FROM events"
-                ).fetchone()[0]
-            )
-
-            record: dict[str, object] = {
-                "schema_version": 2,
-                "event_id": str(uuid.uuid4()),
-                "project_id": self.project_id,
-                "environment_id": self.environment_id,
-                "task_id": task_id,
-                "run_id": task["run_id"],
-                "session_id": task.get("session_id", task["run_id"]),
-                "lineage_id": self.active_state().get(
-                    "lineage_id", task.get("lineage_id", task["run_id"])
-                ),
-                "step_id": step_id,
-                "operation_id": operation_id,
-                "event_type": kind,
-                "received_at_utc": datetime.now(UTC).isoformat(),
-                "source_timestamp": None,
-                "controller_sequence": sequence,
-                "authenticated_actor": None,
-                "reported_actor": origin,
-                "actor_kind": "operator" if observed_source == "operator_cli" else "guest",
-                "observed_source": observed_source,
-                "provenance": provenance,
-                "execution_status": status,
-                "claim_type": claim_type,
-                "git_commit": git_commit,
-                "branch": task["branch"],
-                "checkpoint_id": checkpoint_id,
-                "checkpoint_manifest_sha256": checkpoint_manifest_sha256,
-                "workspace_state_ref": self.active_state().get("workspace_state_ref"),
-                "evidence_refs": refs,
-                "supersedes": supersedes,
-                "payload": {
-                    "summary": summary.strip(),
-                    "details": details,
-                    "applicability": applicability,
-                    "verification": verification or {},
-                    "unknown_fields": [
-                        "question",
-                        "assumptions",
-                        "limitations",
-                        "inputs_parameters",
-                        "code_environment",
-                    ],
-                    "question": "unknown",
-                    "assumptions": "unknown",
-                    "method": "unknown",
-                    "observation": details or "unknown",
-                    "limitations": "unknown",
-                    "inputs_parameters": "unknown",
-                    "code_environment": "unknown",
-                },
-                "previous_sha256": previous,
-            }
-            canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
-            record_hash = hashlib.sha256(canonical).hexdigest()
-            record["record_sha256"] = record_hash
-            encoded = json.dumps(record, sort_keys=True)
-            connection.execute(
-                "INSERT INTO events(event_id,operation_id,task_id,record_json,previous_sha256,record_sha256) VALUES(?,?,?,?,?,?)",
-                (record["event_id"], operation_id, task_id, encoded, previous, record_hash),
-            )
+                    if existing[0] != request_sha256:
+                        raise QSXError("operation ID conflict: immutable request content changed")
+                    row = connection.execute(
+                        "SELECT record_json FROM events WHERE event_id=?", (existing[1],)
+                    ).fetchone()
+                    assert row is not None
+                    existing_record = cast(dict[str, object], json.loads(row[0]))
+                    # Publication is repaired after leaving the transaction.
+                    record = existing_record
+                    duplicate = True
+                else:
+                    duplicate = False
+            else:
+                duplicate = False
+            if duplicate:
+                pass
+            else:
+                record = self._insert_record(
+                    connection,
+                    task,
+                    request,
+                    operation_id,
+                    checkpoint_manifest_sha256,
+                    request_sha256,
+                    operation_scope,
+                )
+                if operation_scope:
+                    connection.execute(
+                        "INSERT INTO idempotency VALUES(?,?,?)",
+                        (operation_scope, request_sha256, record["event_id"]),
+                    )
         self._publish_portable()
         self.render(task_id)
+        return record
+
+    def _insert_record(
+        self,
+        connection: sqlite3.Connection,
+        task: dict[str, object],
+        request: dict[str, object],
+        operation_id: str | None,
+        checkpoint_manifest_sha256: str | None,
+        request_sha256: str,
+        operation_scope: str | None,
+    ) -> dict[str, object]:
+        task_id = cast(str, request["task_id"])
+        last = connection.execute(
+            "SELECT record_sha256 FROM events ORDER BY controller_sequence DESC LIMIT 1"
+        ).fetchone()
+        previous = str(last[0]) if last else "0" * 64
+        sequence = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(controller_sequence),0)+1 FROM events"
+            ).fetchone()[0]
+        )
+
+        record: dict[str, object] = {
+            "schema_version": 2,
+            "event_id": str(uuid.uuid4()),
+            "project_id": self.project_id,
+            "environment_id": self.environment_id,
+            "task_id": task_id,
+            "run_id": task["run_id"],
+            "session_id": task.get("session_id", task["run_id"]),
+            "lineage_id": self.active_state().get(
+                "lineage_id", task.get("lineage_id", task["run_id"])
+            ),
+            "step_id": request["step_id"],
+            "operation_id": operation_id,
+            "operation_request_sha256": request_sha256 if operation_id else None,
+            "event_type": request["kind"],
+            "received_at_utc": datetime.now(UTC).isoformat(),
+            "source_timestamp": None,
+            "controller_sequence": sequence,
+            "authenticated_actor": None,
+            "reported_actor": request["origin"],
+            "actor_kind": "operator" if request["observed_source"] == "operator_cli" else "guest",
+            "observed_source": request["observed_source"],
+            "provenance": request["provenance"],
+            "execution_status": request["status"],
+            "claim_type": request["claim_type"],
+            "git_commit": request["git_commit"],
+            "branch": task["branch"],
+            "checkpoint_id": request["checkpoint_id"],
+            "checkpoint_manifest_sha256": checkpoint_manifest_sha256,
+            "workspace_state_ref": self.active_state().get("workspace_state_ref"),
+            "evidence_refs": request["evidence_refs"],
+            "supersedes": request["supersedes"],
+            "payload": {
+                "summary": request["summary"],
+                "details": request["details"],
+                "applicability": request["applicability"],
+                "verification": request["verification"],
+                "unknown_fields": [
+                    "question",
+                    "assumptions",
+                    "limitations",
+                    "inputs_parameters",
+                    "code_environment",
+                ],
+                "question": "unknown",
+                "assumptions": "unknown",
+                "method": "unknown",
+                "observation": request["details"] or "unknown",
+                "limitations": "unknown",
+                "inputs_parameters": "unknown",
+                "code_environment": "unknown",
+            },
+            "previous_sha256": previous,
+        }
+        canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        record_hash = hashlib.sha256(canonical).hexdigest()
+        record["record_sha256"] = record_hash
+        encoded = json.dumps(record, sort_keys=True)
+        connection.execute(
+            "INSERT INTO events(event_id,operation_id,task_id,record_json,previous_sha256,record_sha256) VALUES(?,?,?,?,?,?)",
+            (
+                record["event_id"],
+                hashlib.sha256(operation_scope.encode()).hexdigest() if operation_scope else None,
+                task_id,
+                encoded,
+                previous,
+                record_hash,
+            ),
+        )
         return record
 
     def _migrate_legacy_tasks(self) -> None:
@@ -317,6 +420,21 @@ class ResearchMemory:
         records = [cast(dict[str, object], json.loads(row[0])) for row in rows]
         self._verify_chain(records)
         return records
+
+    def _snapshot(self, task_id: str) -> tuple[list[dict[str, object]], int, str]:
+        """Capture one SQLite read point; task revision excludes unrelated task events."""
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                "SELECT record_json FROM events ORDER BY controller_sequence"
+            ).fetchall()
+            connection.execute("COMMIT")
+        all_records = [cast(dict[str, object], json.loads(row[0])) for row in rows]
+        self._verify_chain(all_records)
+        task_records = [record for record in all_records if record["task_id"] == task_id]
+        sequence = cast(int, all_records[-1]["controller_sequence"]) if all_records else 0
+        head = str(all_records[-1]["record_sha256"]) if all_records else "0" * 64
+        return task_records, sequence, head
 
     def get(self, event_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
@@ -397,27 +515,69 @@ class ResearchMemory:
                 raise QSXError("research memory local hash chain is inconsistent")
             previous = str(supplied)
 
-    def begin_operation(self, operation_id: str, task_id: str, kind: str) -> str:
+    def begin_operation(
+        self,
+        operation_id: str,
+        task_id: str,
+        kind: str,
+        parameters: dict[str, object] | None = None,
+    ) -> str:
         self._task(task_id)
+        scope = f"{self.project_id}:{task_id}:{kind}:{operation_id}"
+        internal_id = hashlib.sha256(scope.encode()).hexdigest()
+        request_sha256 = hashlib.sha256(
+            json.dumps(parameters or {}, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+                "SELECT o.state,k.request_sha256 FROM operation_keys k JOIN operations o "
+                "ON o.operation_id=k.internal_operation_id WHERE k.scope=?",
+                (scope,),
             ).fetchone()
             if row:
+                if row[1] != request_sha256:
+                    raise QSXError("operation ID conflict: operation parameters changed")
                 return str(row[0])
             connection.execute(
                 "INSERT INTO operations VALUES(?,?,?,?,?,NULL,'')",
-                (operation_id, task_id, kind, "INTENT", datetime.now(UTC).isoformat()),
+                (internal_id, task_id, kind, "INTENT", datetime.now(UTC).isoformat()),
+            )
+            connection.execute(
+                "INSERT INTO operation_keys VALUES(?,?,?)",
+                (scope, request_sha256, internal_id),
             )
         return "INTENT"
 
-    def finish_operation(self, operation_id: str, state: str, detail: str = "") -> None:
+    def finish_operation(
+        self,
+        operation_id: str,
+        state: str,
+        detail: str = "",
+        *,
+        task_id: str | None = None,
+        kind: str | None = None,
+    ) -> None:
         if state not in {"COMPLETED", "FAILED", "RECONCILE"}:
             raise QSXError("invalid operation terminal state")
         with self._transaction() as connection:
+            if task_id and kind:
+                scope = f"{self.project_id}:{task_id}:{kind}:{operation_id}"
+                key = connection.execute(
+                    "SELECT internal_operation_id FROM operation_keys WHERE scope=?", (scope,)
+                ).fetchone()
+            else:
+                key = connection.execute(
+                    "SELECT internal_operation_id FROM operation_keys WHERE scope LIKE ?",
+                    (f"{self.project_id}:%:%:{operation_id}",),
+                ).fetchall()
+                if len(key) != 1:
+                    raise QSXError("operation scope is ambiguous or missing")
+                key = key[0]
+            if not key:
+                raise QSXError("operation intent does not exist")
             changed = connection.execute(
                 "UPDATE operations SET state=?,finished_at=?,detail=? WHERE operation_id=?",
-                (state, datetime.now(UTC).isoformat(), detail[:1000], operation_id),
+                (state, datetime.now(UTC).isoformat(), detail[:1000], key[0]),
             ).rowcount
             if changed != 1:
                 raise QSXError("operation intent does not exist")
@@ -425,7 +585,9 @@ class ResearchMemory:
     def reconcile(self) -> list[dict[str, str]]:
         with self._transaction() as connection:
             rows = connection.execute(
-                "SELECT operation_id,task_id,kind FROM operations WHERE state='INTENT'"
+                "SELECT o.operation_id,o.task_id,o.kind,k.scope FROM operations o "
+                "JOIN operation_keys k ON k.internal_operation_id=o.operation_id "
+                "WHERE o.state='INTENT'"
             ).fetchall()
             for row in rows:
                 connection.execute(
@@ -433,7 +595,12 @@ class ResearchMemory:
                     (datetime.now(UTC).isoformat(), row[0]),
                 )
         return [
-            {"operation_id": row[0], "task_id": row[1], "kind": row[2], "state": "RECONCILE"}
+            {
+                "operation_id": str(row[3]).removeprefix(f"{self.project_id}:{row[1]}:{row[2]}:"),
+                "task_id": row[1],
+                "kind": row[2],
+                "state": "RECONCILE",
+            }
             for row in rows
         ]
 
@@ -515,13 +682,22 @@ class ResearchMemory:
         if destination.exists():
             raise QSXError("research export destination already exists")
         views = self.render(task_id)
+        generation = views["manifest.json"].parent
         temporary = destination.with_name(f".{destination.name}-{uuid.uuid4().hex}.tmp")
         temporary.mkdir(parents=True, mode=0o700)
         try:
-            for path in views.values():
-                if path.name != "manifest.json":
+            for path in generation.iterdir():
+                if path.name in {"manifest.json", ".qsx-generated"}:
+                    continue
+                if path.is_dir():
+                    shutil.copytree(path, temporary / path.name)
+                else:
                     shutil.copy2(path, temporary / path.name)
-            records = [record for record in self.records() if record["task_id"] == task_id]
+            records = [
+                cast(dict[str, object], json.loads(path.read_text()))
+                for path in sorted((temporary / "events").glob("*.json"))
+            ]
+            records.sort(key=lambda record: cast(int, record["controller_sequence"]))
             with (temporary / "events.jsonl").open("w", encoding="utf-8") as output:
                 for record in records:
                     output.write(json.dumps(record, sort_keys=True) + "\n")
@@ -542,12 +718,20 @@ class ResearchMemory:
                             "SELECT task_id,media_type,size,sha256,stored_path FROM artifacts WHERE artifact_id=?",
                             (ref,),
                         ).fetchone()
-                        if not row or row[0] != task_id or not Path(row[4]).is_file():
+                        stored = Path(row[4]) if row else None
+                        if (
+                            not row
+                            or row[0] != task_id
+                            or stored is None
+                            or not stored.is_file()
+                            or stored.stat().st_size != row[2]
+                            or sha256(stored) != row[3]
+                        ):
                             artifact_manifests.append(
                                 {"artifact_id": ref, "availability": "MISSING"}
                             )
                             continue
-                        shutil.copy2(row[4], artifact_dir / row[3])
+                        shutil.copy2(stored, artifact_dir / row[3])
                         artifact_manifests.append(
                             {
                                 "artifact_id": ref,
@@ -559,6 +743,9 @@ class ResearchMemory:
                         )
             view_manifest = json.loads(views["manifest.json"].read_text())
             view_manifest["artifacts"] = artifact_manifests
+            view_manifest["portable_scope"] = "single-task-events-and-referenced-artifacts"
+            view_manifest["file_manifest_schema"] = "qsx-bundle-files-v1"
+            view_manifest["files"] = _file_inventory(temporary)
             atomic_json(temporary / "manifest.json", view_manifest)
             os.replace(temporary, destination)
         finally:
@@ -567,18 +754,55 @@ class ResearchMemory:
     def check_bundle(self, task_id: str, bundle: Path) -> dict[str, object]:
         manifest_path = bundle / "manifest.json"
         if not manifest_path.is_file():
-            return {"status": "BLOCKED", "reason": "manifest missing"}
-        manifest = cast(dict[str, object], json.loads(manifest_path.read_text()))
-        records = self.records()
-        revision = str(records[-1]["record_sha256"]) if records else "0" * 64
-        reasons = []
+            return {
+                "integrity": "FAIL",
+                "freshness": "UNKNOWN",
+                "authenticity": "NOT_ESTABLISHED",
+                "ready": False,
+                "reasons": ["manifest missing"],
+            }
+        try:
+            manifest = cast(dict[str, object], json.loads(manifest_path.read_text()))
+        except (OSError, json.JSONDecodeError):
+            return {
+                "integrity": "FAIL",
+                "freshness": "UNKNOWN",
+                "authenticity": "NOT_ESTABLISHED",
+                "ready": False,
+                "reasons": ["manifest invalid"],
+            }
+        reasons = _verify_file_inventory(bundle, manifest.get("files"))
+        reasons.extend(_verify_event_export(bundle, task_id))
+        integrity = "PASS" if not reasons else "FAIL"
+        task_records, global_sequence, global_head = self._snapshot(task_id)
+        revision = _task_revision(task_records)
+        freshness_reasons = []
         if manifest.get("project_id") != self.project_id or manifest.get("task_id") != task_id:
-            reasons.append("project/task mismatch")
-        if manifest.get("journal_revision") != revision:
-            reasons.append("journal revision changed")
+            freshness_reasons.append("project/task mismatch")
+        if manifest.get("task_revision") != revision:
+            freshness_reasons.append("task revision changed")
         if manifest.get("active_state") != self.active_state():
-            reasons.append("observed workspace/checkpoint state changed")
-        return {"status": "STALE" if reasons else "CURRENT", "reasons": reasons}
+            freshness_reasons.append("observed workspace/checkpoint state changed")
+        if "task_revision" not in manifest:
+            freshness_reasons.append("MIGRATION_REQUIRED: legacy revision contract")
+        freshness = (
+            "MIGRATION_REQUIRED"
+            if any(str(reason).startswith("MIGRATION_REQUIRED") for reason in freshness_reasons)
+            else "STALE"
+            if freshness_reasons
+            else "CURRENT"
+        )
+        return {
+            "integrity": integrity,
+            "freshness": freshness,
+            "authenticity": "NOT_ESTABLISHED",
+            "ready": integrity == "PASS" and freshness == "CURRENT",
+            "reasons": reasons + freshness_reasons,
+            "controller_global_read_point": {
+                "sequence": global_sequence,
+                "head_sha256": global_head,
+            },
+        }
 
     def _verify_artifacts(self, task_id: str, refs: list[str]) -> None:
         with self._connect() as connection:
@@ -662,24 +886,32 @@ class ResearchMemory:
             return self._render_unlocked(task_id, budget)
 
     def _render_unlocked(self, task_id: str, budget: int) -> dict[str, Path]:
-        records = [record for record in self.records() if record["task_id"] == task_id]
-        revision = str(records[-1]["record_sha256"]) if records else "0" * 64
-        target = self.root / "views" / task_id
-        parent = target.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = Path(tempfile.mkdtemp(prefix=f".{task_id}-", dir=parent))
+        records, global_sequence, global_head = self._snapshot(task_id)
+        revision = _task_revision(records)
+        active_state = self.active_state()
+        state_sha256 = hashlib.sha256(
+            json.dumps(active_state, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        generation_id = f"v{RENDERER_VERSION}-b{budget}-{revision[:16]}-{state_sha256[:16]}"
+        generations = self.root / "generations" / task_id
+        generations.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = generations / generation_id
+        if target.is_dir():
+            self._point_current(task_id, target)
+            return _view_paths(target)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{generation_id}-", dir=generations))
         try:
             events = temporary / "events"
             events.mkdir()
             for record in records:
                 atomic_json(events / f"{record['event_id']}.json", record)
-            lines = [_line(record) for record in records]
+            lines = _annotated_lines(records, active_state)
             (temporary / "CHANGELOG.md").write_text("# CHANGELOG\n\n" + "\n".join(lines) + "\n")
             (temporary / "MEMORY.md").write_text(
                 "# MEMORY\n\n"
                 + "\n".join(
-                    _line(r)
-                    for r in records
+                    line
+                    for r, line in zip(records, lines, strict=True)
                     if r["event_type"] in {"research", "evidence", "correction"}
                 )
                 + "\n"
@@ -687,13 +919,13 @@ class ResearchMemory:
             (temporary / "LIFE.md").write_text(
                 "# LIFE\n\n"
                 + "\n".join(
-                    _line(r)
-                    for r in records
+                    line
+                    for r, line in zip(records, lines, strict=True)
                     if r["event_type"] in {"lifecycle", "handoff", "operation"}
                 )
                 + "\n"
             )
-            context, omitted = self._context(task_id, records, revision, budget)
+            context, omitted = self._context(task_id, records, revision, budget, active_state)
             (temporary / "CONTEXT.md").write_text(context)
             manifest = {
                 "schema_version": 1,
@@ -701,9 +933,13 @@ class ResearchMemory:
                 "project_id": self.project_id,
                 "environment_id": self.environment_id,
                 "task_id": task_id,
-                "journal_revision": revision,
+                "task_revision": revision,
+                "global_read_point": {
+                    "controller_sequence": global_sequence,
+                    "record_sha256": global_head,
+                },
                 "event_count": len(records),
-                "active_state": self.active_state(),
+                "active_state": active_state,
                 "context_budget_bytes": budget,
                 "omitted_context_records": omitted,
                 "local_chain_consistency": "PASS",
@@ -712,27 +948,32 @@ class ResearchMemory:
             atomic_json(temporary / "manifest.json", manifest)
             marker = temporary / ".qsx-generated"
             marker.write_text("research-memory-v1\n")
-            if target.exists():
-                if not (target / ".qsx-generated").is_file():
-                    raise QSXError("refusing to overwrite an unowned research directory")
-                old = parent / f".{task_id}-old-{uuid.uuid4().hex}"
-                os.replace(target, old)
-                os.replace(temporary, target)
-                shutil.rmtree(old)
-            else:
-                os.replace(temporary, target)
+            os.replace(temporary, target)
+            self._point_current(task_id, target)
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
-        return {
-            name: target / name
-            for name in ("CHANGELOG.md", "MEMORY.md", "LIFE.md", "CONTEXT.md", "manifest.json")
-        }
+        return _view_paths(target)
+
+    def _point_current(self, task_id: str, generation: Path) -> None:
+        views = self.root / "views"
+        views.mkdir(parents=True, exist_ok=True, mode=0o700)
+        pointer = views / task_id
+        if pointer.exists() and not pointer.is_symlink():
+            legacy = generation.parent / f"legacy-{uuid.uuid4().hex}"
+            os.replace(pointer, legacy)
+        temporary = views / f".{task_id}-{uuid.uuid4().hex}.tmp"
+        temporary.symlink_to(generation, target_is_directory=True)
+        os.replace(temporary, pointer)
 
     def _context(
-        self, task_id: str, records: list[dict[str, object]], revision: str, budget: int
+        self,
+        task_id: str,
+        records: list[dict[str, object]],
+        revision: str,
+        budget: int,
+        state: dict[str, object],
     ) -> tuple[str, int]:
         task = self._task(task_id)
-        state = self.active_state()
         critical = [
             "# CONTEXT",
             "",
@@ -751,24 +992,25 @@ class ResearchMemory:
         base = "\n".join(critical) + "\n"
         if len(base.encode()) > budget:
             raise QSXError("context budget cannot contain critical warnings")
+        units = _context_units(records, state)
+        units.sort(key=lambda item: (not item[0], -item[1]))
         selected: list[str] = []
-        omitted = 0
-        priority = sorted(
-            records,
-            key=lambda r: (
-                r["execution_status"] not in {"FAIL", "BLOCKED", "NOT_RUN"},
-                -cast(int, r["controller_sequence"]),
-            ),
-        )
-        for record in priority:
-            line = _line(record)
-            if len((base + "\n".join(selected + [line]) + "\n").encode()) <= budget:
-                selected.append(line)
-            else:
-                omitted += 1
-        return base + "\n".join(
-            selected
-        ) + f"\n\nOmitted records due to budget: {omitted}. Full records: `events/`.\n", omitted
+        omitted = len(units)
+        for _critical, _sequence, text in units:
+            candidate = selected + [text]
+            candidate_omitted = len(units) - len(candidate)
+            footer = (
+                f"\n\nOmitted record groups due to budget: {candidate_omitted}. "
+                "Full records: `events/`.\n"
+            )
+            if len((base + "\n".join(candidate) + footer).encode("utf-8")) <= budget:
+                selected = candidate
+                omitted = candidate_omitted
+        footer = f"\n\nOmitted record groups due to budget: {omitted}. Full records: `events/`.\n"
+        result = base + "\n".join(selected) + footer
+        if len(result.encode("utf-8")) > budget:
+            raise QSXError("context budget cannot contain required header, warnings and footer")
+        return result, omitted
 
     def _publish_portable(self) -> None:
         with (self.root / ".publish.lock").open("a", encoding="utf-8") as lock:
@@ -795,3 +1037,130 @@ def _line(record: dict[str, object]) -> str:
         f"- **{record['execution_status']}** [{record['claim_type']}; {record['provenance']}] "
         f"{payload['summary']} ({', '.join(links)})"
     )
+
+
+def _knowledge_state(
+    record: dict[str, object], superseded_by: dict[str, list[str]], active_lineage: object
+) -> str:
+    event_id = str(record["event_id"])
+    if event_id in superseded_by:
+        return "SUPERSEDED_BY:" + ",".join(superseded_by[event_id])
+    if record.get("supersedes"):
+        return f"CORRECTS:{record['supersedes']}"
+    payload = cast(dict[str, object], record["payload"])
+    applicability = str(payload.get("applicability", "unknown"))
+    if applicability == "general":
+        return "ACTIVE_GENERAL"
+    if applicability == "unknown":
+        return "UNKNOWN_SCOPE"
+    if record.get("lineage_id") != active_lineage:
+        return "HISTORICAL_LINEAGE"
+    return "ACTIVE_LINEAGE"
+
+
+def _annotated_lines(records: list[dict[str, object]], state: dict[str, object]) -> list[str]:
+    superseded_by: dict[str, list[str]] = {}
+    for record in records:
+        if record.get("supersedes"):
+            superseded_by.setdefault(str(record["supersedes"]), []).append(str(record["event_id"]))
+    return [
+        f"{_line(record)} — `{_knowledge_state(record, superseded_by, state.get('lineage_id'))}`"
+        for record in records
+    ]
+
+
+def _context_units(
+    records: list[dict[str, object]], state: dict[str, object]
+) -> list[tuple[bool, int, str]]:
+    lines = _annotated_lines(records, state)
+    by_id = {
+        str(record["event_id"]): (record, line) for record, line in zip(records, lines, strict=True)
+    }
+    superseded = {str(record["supersedes"]) for record in records if record.get("supersedes")}
+    units = []
+    for record, line in zip(records, lines, strict=True):
+        event_id = str(record["event_id"])
+        if event_id in superseded:
+            continue
+        correction_target = str(record["supersedes"]) if record.get("supersedes") else None
+        text = line
+        if correction_target and correction_target in by_id:
+            text = by_id[correction_target][1] + "\n  " + line
+        critical = record["execution_status"] in {"FAIL", "BLOCKED", "NOT_RUN"} or bool(
+            correction_target
+        )
+        units.append((critical, cast(int, record["controller_sequence"]), text))
+    return units
+
+
+def _task_revision(records: list[dict[str, object]]) -> str:
+    material = [
+        {"event_id": record["event_id"], "record_sha256": record["record_sha256"]}
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _view_paths(root: Path) -> dict[str, Path]:
+    return {
+        name: root / name
+        for name in (
+            "CHANGELOG.md",
+            "MEMORY.md",
+            "LIFE.md",
+            "CONTEXT.md",
+            "manifest.json",
+        )
+    }
+
+
+def _file_inventory(root: Path) -> list[dict[str, object]]:
+    entries = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if relative == Path("manifest.json"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            if path.is_dir():
+                continue
+            raise QSXError(f"unsupported bundle object: {relative}")
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "type": "file",
+                "size": path.stat().st_size,
+                "sha256": sha256(path),
+            }
+        )
+    return entries
+
+
+def _verify_file_inventory(root: Path, supplied: object) -> list[str]:
+    if not isinstance(supplied, list):
+        return ["file manifest missing or invalid"]
+    try:
+        actual = _file_inventory(root)
+    except QSXError as exc:
+        return [str(exc)]
+    return [] if actual == supplied else ["declared file set, size, or SHA-256 differs"]
+
+
+def _verify_event_export(root: Path, task_id: str) -> list[str]:
+    journal = root / "events.jsonl"
+    events = root / "events"
+    if not journal.is_file() or not events.is_dir():
+        return ["events.jsonl or events directory missing"]
+    try:
+        jsonl = [json.loads(line) for line in journal.read_text().splitlines()]
+        files = [json.loads(path.read_text()) for path in sorted(events.glob("*.json"))]
+    except (OSError, json.JSONDecodeError):
+        return ["event representation is invalid JSON"]
+    if any(record.get("task_id") != task_id for record in jsonl + files):
+        return ["event from another task is present"]
+    by_id_jsonl = {record.get("event_id"): record for record in jsonl}
+    by_id_files = {record.get("event_id"): record for record in files}
+    if by_id_jsonl != by_id_files or len(jsonl) != len(files):
+        return ["events JSON files differ semantically from events.jsonl"]
+    return []

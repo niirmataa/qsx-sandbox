@@ -22,3 +22,18 @@ Implementation status is separate from execution status. `PASS` below means a te
 | Physical VM collection/restore/isolation | documented acceptance | Ubuntu host acceptance | Physical host | MISSING; BLOCKED |
 
 The closure work will retain JSONL as the portable representation while using standard-library SQLite for transactional controller state. Hashes prove local chain consistency only unless compared with an independently stored trust anchor; neither hashes nor signatures establish scientific truth.
+
+## RM closure mapping
+
+| RM | Contract implementation | Regression evidence |
+|---|---|---|
+| RM01 | Full immutable `events/` copied; JSON/JSONL task semantics checked | `test_export_contains_complete_linked_events_and_detects_damage` |
+| RM02 | Exact `qsx-bundle-files-v1`; separate integrity/freshness/authenticity/ready | export damage and artifact bundle tests |
+| RM03 | `task_revision` separate from `global_read_point` | `test_task_revision_ignores_unrelated_task_records` |
+| RM04 | project/task/channel operation scope plus canonical request digest; rollback parameter binding | idempotency, cross-task, outbox and rollback-conflict tests |
+| RM05 | derived scope/supersession state and atomic correction budget units | correction-budget and applicability tests |
+| RM06 | complete typed nonblank checker metadata and lowercase full SHA-256 values | verification parameter matrix and guest-escalation test |
+| RM07 | final UTF-8 byte length including footer is enforced | Unicode, omission, empty/boundary tests |
+| RM08 | immutable generations plus atomic pointer; export consumes one generation | pre/post-pointer interruption and controlled concurrent export tests |
+
+All rows are controller-level Cloud evidence. They do not constitute physical VM acceptance or independent authentication of scientific claims. Detailed execution status and limitations are in `reports/RM_CLOSURE.md`.

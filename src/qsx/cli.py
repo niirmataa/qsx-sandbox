@@ -263,9 +263,9 @@ def main(argv: list[str] | None = None) -> int:
                     operation_id=operation_id,
                     claim_type="LIFECYCLE",
                 )
-                memory.finish_operation(operation_id, "COMPLETED")
+                memory.finish_operation(operation_id, "COMPLETED", task_id=task_id, kind="start")
             except BaseException:
-                memory.finish_operation(operation_id, "FAILED")
+                memory.finish_operation(operation_id, "FAILED", task_id=task_id, kind="start")
                 raise
         elif args.command == "status":
             status = backend.status(config.name)

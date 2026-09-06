@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -211,6 +212,22 @@ def test_checkpoint_parent_follows_rollback_lineage(cfg: Config) -> None:
         checkpoint_a["checkpoint_id"],
         checkpoint_c["checkpoint_id"],
     ]
+
+
+def test_rollback_operation_id_conflict_is_before_disk_change(cfg: Config) -> None:
+    (cfg.source / "x").write_text("a")
+    import_project(cfg, "task")
+    create_disk(cfg.disk, 1)
+    checkpoints = Checkpoints(cfg, lambda _: False, inspect_staging)
+    checkpoint_a = checkpoints.create("task")
+    checkpoint_b = checkpoints.create("task")
+    operation_id = "operator-rollback-1"
+    checkpoints.rollback(str(checkpoint_a["checkpoint_id"]), operation_id=operation_id)
+    pointer_before = json.loads((cfg.state_dir / "checkpoint-state.json").read_text())
+    with pytest.raises(QSXError, match="operation ID conflict"):
+        checkpoints.rollback(str(checkpoint_b["checkpoint_id"]), operation_id=operation_id)
+    pointer_after = json.loads((cfg.state_dir / "checkpoint-state.json").read_text())
+    assert pointer_after == pointer_before
 
 
 def test_real_offline_guest_provisioning(cfg: Config, tmp_path: Path) -> None:

@@ -41,3 +41,15 @@ qsx --config qsx.toml history-reconcile
 ```
 
 The controller parses and stores data and hashes bytes. It does not execute imported project code, hooks, tests, commands embedded in notes, or evidence programs.
+
+## RM01–RM08 closure contract
+
+Exports contain the immutable generation's complete `events/` directory and task-filtered JSONL. `qsx-bundle-files-v1` inventories every exported file except its containing `manifest.json` using path, regular-file type, byte size and SHA-256. Checking returns independent `integrity`, `freshness`, `authenticity`, and boolean `ready` results. A damaged but current package is never ready; a sound older package remains integral but STALE.
+
+A task revision is a deterministic digest of that task's ordered event IDs and record hashes. The manifest separately records the project's global SQLite read point. Unrelated notes in task B do not stale task A; changes to A or its captured active state do. Portable JSONL is explicitly single-task scope.
+
+Idempotency keys are scoped by project, task, controlled observed source and local operation ID, and bind a canonical request SHA-256. Identical retries repair publication and return the same event; changed requests conflict. Rollback operation requests additionally bind checkpoint target, disk path and rescue policy before disk mutation.
+
+Knowledge views derive explicit scope state. General knowledge can remain active after rollback; lineage-dependent records become historical; unknown applicability remains unknown; corrected originals are marked SUPERSEDED and displayed with their correction as one context-budget unit. This is presentation, not automatic scientific adjudication.
+
+Views live in immutable `generations/<task>/<renderer-budget-revision-state>/` directories. An atomically replaced `views/<task>` symlink selects the current complete generation. Interrupted publication leaves either the complete old or complete new generation accessible. Export copies one returned immutable generation, so concurrent ledger changes cannot mix revisions. SQLite, view files, QCOW2 and checkpoint metadata remain distinct durability domains.

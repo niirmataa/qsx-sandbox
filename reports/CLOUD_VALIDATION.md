@@ -13,14 +13,14 @@ Context is a Codex Cloud runner, not target hardware. Python 3.12.13; Git 2.43.0
 | Hardened rollback | PASS | malformed/traversal IDs, incomplete/tampered image, hash and unique rescues tested | full guest recovery BLOCKED |
 | Offline wheel acceptance | PASS | wheel built without downloads, fresh venv, install `--no-index`, help/doctor outside repo | none for installability |
 | Dependency lock reproduction | PASS | fresh venv, locally cached setup wheels, `pip --require-hashes --no-index`, then `pip check` | lock targets CPython 3.12/Linux x86_64 |
-| Research Memory v1 | PASS | real SQLite/WAL transactions, concurrent writes, idempotency, recovery, local chain, context budget/staleness, artifacts, outbox classification, generated views and rollback lineage | synthetic controller filesystems; physical guest collection BLOCKED |
+| Research Memory RM01–RM08 | PASS | real SQLite/WAL, complete manifested exports, scoped revisions/idempotency, correction semantics, verification validation, byte budget, immutable generations and controlled concurrency/fault injection | synthetic controller filesystems; see `RM_CLOSURE.md`; physical guest collection BLOCKED |
 | T13 interruption injection | NOT RUN | normal atomic staging is tested | power-loss injection not executed |
 | T14 repository scan | PASS | security audit | heuristic; snapshots may contain secrets |
 | T15 secondary media | NOT RUN | none | requires operator storage |
 | Real KVM/VM boot/firewall/OpenAI route | BLOCKED | `/dev/kvm` absent and no target host | physical-host acceptance required |
 | Optional TCG boot | NOT RUN | no approved boot fixture | never a production fallback |
 
-The expanded suite executed 36 tests. Mandatory cloud gates executed here are PASS. This is `CLOUD_VALIDATED` for implementation and offline integration only; it is explicitly not `HOST_VALIDATED`, and no claim is made that a booted rollback or network boundary works.
+The expanded suite executed 51 tests at code revision `499ec1a6ebd519bfb6fb2e17aa32a3d714af2b1b`. Mandatory cloud gates executed here are PASS. This is `CLOUD_VALIDATED` for implementation and offline integration only; it is explicitly not `HOST_VALIDATED`, and no claim is made that a booted rollback or network boundary works.
 
 ## Synthetic lineage evidence
 
