@@ -1,0 +1,11 @@
+# Proposal only: replace this ID with the selected private instance's instance_id.
+# This file grants no capability by itself. It is consumed only by explicit
+# network-prepare/network-grant; do not pass it to image-build/instance-create.
+schema_version = 1
+network_profile = "openai-chatgpt-proxy"
+instance_id = "qsx-00000000-0000-0000-0000-000000000000"
+network_name = "qsx-codex-egress"
+bridge = "qsx-egress0"
+proxy_url = "http://192.168.250.1:3128"
+guest_cidr = "192.168.250.2/30"
+allowed_hosts = ["auth.openai.com", "chatgpt.com"]

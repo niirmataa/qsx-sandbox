@@ -1,0 +1,7 @@
+<!-- Proposal: one selected VM, no NAT, forwarding, DHCP, DNS or autostart. -->
+<network>
+  <name>qsx-codex-egress</name>
+  <bridge name='qsx-egress0' stp='off' delay='0'/>
+  <dns enable='no'/>
+  <ip address='192.168.250.1' netmask='255.255.255.252'/>
+</network>

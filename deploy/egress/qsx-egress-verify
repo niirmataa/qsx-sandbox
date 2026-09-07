@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fixed executable, isolated Python, no operator-supplied arguments or paths.
+[ "$#" -eq 0 ] || exit 64
+exec /opt/qsx-egress/bin/python -I -m qsx_alpine.egress_verify

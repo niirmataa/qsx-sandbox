@@ -1,0 +1,3 @@
+# Install only after operator approval; exact command and zero arguments.
+# This grants observation, not root execution of the builder or network changes.
+god ALL=(root) NOPASSWD: /usr/local/sbin/qsx-egress-verify ""

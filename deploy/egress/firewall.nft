@@ -1,0 +1,39 @@
+# Separate tables. Never flush or replace the host ruleset.
+# Load BEFORE starting the isolated libvirt network or attaching its first NIC.
+# Leave these tables installed until every NIC is cut and network destroyed.
+table inet qsx_codex_egress {
+  chain input {
+    type filter hook input priority -20; policy accept;
+    iifname "qsx-egress0" ip saddr 192.168.250.2 ip daddr 192.168.250.1 tcp dport 3128 accept
+    iifname "qsx-egress0" counter drop
+  }
+  chain forward {
+    type filter hook forward priority -20; policy accept;
+    iifname "qsx-egress0" counter drop
+    oifname "qsx-egress0" counter drop
+  }
+  chain output {
+    type filter hook output priority -20; policy accept;
+    oifname "qsx-egress0" ip saddr 192.168.250.1 ip daddr 192.168.250.2 tcp sport 3128 ct state established accept
+    oifname "qsx-egress0" counter drop
+  }
+}
+table bridge qsx_codex_egress {
+  chain input {
+    type filter hook input priority -20; policy accept;
+    meta ibrname "qsx-egress0" ether type arp arp saddr ip 192.168.250.2 arp daddr ip 192.168.250.1 accept
+    meta ibrname "qsx-egress0" ether type ip ip saddr 192.168.250.2 ip daddr 192.168.250.1 tcp dport 3128 accept
+    meta ibrname "qsx-egress0" counter drop
+  }
+  chain forward {
+    type filter hook forward priority -20; policy accept;
+    meta ibrname "qsx-egress0" counter drop
+    meta obrname "qsx-egress0" counter drop
+  }
+  chain output {
+    type filter hook output priority -20; policy accept;
+    meta obrname "qsx-egress0" ether type arp arp saddr ip 192.168.250.1 arp daddr ip 192.168.250.2 accept
+    meta obrname "qsx-egress0" ether type ip ip saddr 192.168.250.1 ip daddr 192.168.250.2 tcp sport 3128 accept
+    meta obrname "qsx-egress0" counter drop
+  }
+}
