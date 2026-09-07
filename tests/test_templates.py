@@ -13,6 +13,7 @@ from qsx_alpine.errors import QSXError
 from qsx_alpine.templates import (
     BASE,
     CODEX,
+    _build_workspace,
     _digest,
     _freeze_artifacts,
     _guest_script,
@@ -520,3 +521,19 @@ def test_real_seed_keeps_additional_artifact_opaque(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert extracted.read_bytes() == content
+
+
+@pytest.mark.parametrize("failure", [QSXError("failed readiness"), KeyboardInterrupt()])
+def test_failed_build_keeps_disk_seed_and_log_across_next_attempt(
+    tmp_path: Path, failure: BaseException
+) -> None:
+    with pytest.raises(type(failure)), _build_workspace(tmp_path) as first:
+        for name in ("disk.qcow2", "seed.iso", "build.boot.log"):
+            (first / name).write_bytes(b"failed attempt evidence")
+        raise failure
+    with _build_workspace(tmp_path) as second:
+        assert first != second
+        (second / "build.boot.log").write_bytes(b"successful attempt")
+    assert not second.exists()
+    for name in ("disk.qcow2", "seed.iso", "build.boot.log"):
+        assert (first / name).read_bytes() == b"failed attempt evidence"

@@ -22,6 +22,8 @@ import tomllib
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -774,6 +776,16 @@ def _publish_image(
         raise
 
 
+@contextmanager
+def _build_workspace(cached: Path) -> Iterator[Path]:
+    """Keep a failed attempt's disk, seed and log for diagnosis; never reuse it."""
+    work = Path(tempfile.mkdtemp(prefix="qsx-build-", dir=cached))
+    # Exceptions from the caller propagate at yield, keeping this unique
+    # attempt intact. Only a completed build authorizes removal of scratch data.
+    yield work
+    shutil.rmtree(work)
+
+
 def build_image(
     lock: Path | str,
     cache: Path | str,
@@ -832,8 +844,7 @@ def build_image(
             raise QSXError(
                 "KVM is unavailable; no automatic TCG fallback (use explicit --accelerator tcg for testing)"
             )
-        with tempfile.TemporaryDirectory(prefix="qsx-build-", dir=cached) as temporary:
-            work = Path(temporary)
+        with _build_workspace(cached) as work:
             disk = work / "disk.qcow2"
             source = _inside(cache, data["base_path"])
             source_info = _check_qcow(source)
@@ -843,7 +854,7 @@ def build_image(
             run(["qemu-img", "resize", "-f", "qcow2", str(disk), f"{resources['disk_gib']}G"])
             marker = "QSX_BUILD_READY_" + uuid.uuid4().hex
             medium = _make_seed(data, cache, work, marker)
-            boot_log = cached / "build.boot.log"
+            boot_log = work / "build.boot.log"
             qemu = [
                 "qemu-system-x86_64",
                 "-machine",
@@ -904,6 +915,9 @@ def build_image(
             )
             info = _check_qcow(cached_image)
             cached_image.chmod(0o444)
+            retained_log = cached / "build.boot.log"
+            shutil.copy2(boot_log, retained_log)
+            boot_log = retained_log
             manifest = {
                 "schema_version": 1,
                 "image": cached_image.name,
