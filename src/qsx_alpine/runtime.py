@@ -318,24 +318,48 @@ def create_instance(
         raise
 
 
-def _runtime_policy(instance: Instance) -> None:
+def _runtime_policy(instance: Instance) -> dict[str, Any] | None:
+    from .runtime_egress import PROFILE, load_egress_policy, policy_digest
+
+    grant = None
     if instance.metadata.get("network_profile") != "offline":
-        raise QSXError("only an enforced offline instance can start")
+        if (instance.metadata.get("network_profile") != PROFILE
+                or instance.metadata.get("network_cut_latched") is not False):
+            raise QSXError("egress grant is absent or network-cut remains latched")
+        grant = instance.metadata.get("egress_grant")
+        if (not isinstance(grant, dict) or grant.get("revoked_at_unix") is not None
+                or any(not isinstance(grant.get(key), str) for key in (
+                    "policy_source", "policy_sha256", "mac", "boot_id", "deployment_sha256"
+                ))):
+            raise QSXError("egress requires a current explicit instance grant")
+        current = load_egress_policy(Path(grant["policy_source"]), instance.metadata["instance_id"])
+        if policy_digest(current) != grant.get("policy_sha256"):
+            raise QSXError("egress operator policy changed since the explicit grant")
     path = instance.metadata.get("policy_source")
     policy = load_policy(Path(path) if path else None)
     resolve_resources(instance.metadata["resources"], None, policy)
+    return grant
 
 
 def start_instance(path: Path | str) -> dict[str, Any]:
     with _locked(path) as instance:
-        _runtime_policy(instance)
+        grant = _runtime_policy(instance)
+        pending = instance.metadata.get("egress_pending")
+        if pending:
+            medium = instance.directory / pending["medium"]
+            if (medium.name != pending["medium"] or medium.is_symlink() or not medium.is_file()
+                    or sha256(medium) != pending["medium_sha256"]):
+                raise QSXError("private egress configuration medium changed before startup")
         backend = LibvirtBackend()
         if not instance.metadata["domain_defined"]:
             backend.define(instance.directory / "domain.xml")
             instance.metadata["domain_defined"] = True
             _save(instance)
         requested = time.monotonic()
-        backend.start(instance.name)
+        if grant is None:
+            backend.start(instance.name)
+        else:
+            backend.start(instance.name, egress=grant)
         instance.metadata["phase"] = "running"
         instance.metadata["last_start_unix"] = time.time()
         instance.metadata["measurements"]["launch_seconds"] = time.monotonic() - requested
@@ -456,9 +480,125 @@ def network_cut(path: Path | str) -> dict[str, object]:
         # an earlier network grant on a later start or recovery attempt.
         instance.metadata["network_profile"] = "offline"
         instance.metadata["network_cut_latched"] = True
+        if instance.metadata.get("egress_grant"):
+            instance.metadata["egress_grant"]["revoked_at_unix"] = time.time()
+        if instance.metadata.get("egress_pending"):
+            instance.metadata["egress_pending"]["revoked"] = True
         _save(instance)
         if not instance.metadata["domain_defined"]:
             return {"network_profile": "offline", "active": False, "domain_defined": False}
-        result = LibvirtBackend().network_cut(instance.name)
+        backend = LibvirtBackend()
+        result = backend.network_cut(instance.name)
+        (instance.directory / "domain.xml").write_text(backend.definition(instance.name))
         atomic_json(instance.directory / "network-cut.json", result)
         return result
+
+
+def prepare_network(path: Path | str, policy: Path) -> dict[str, Any]:
+    """Import public network settings into one private VM, still completely offline."""
+    from .runtime_egress import check_domain, load_egress_policy, make_seed, policy_digest
+
+    with _locked(path) as instance:
+        admitted = load_egress_policy(policy, instance.metadata["instance_id"])
+        if not instance.metadata["import_finalized"] or not instance.metadata["domain_defined"]:
+            raise QSXError("finalize the project import before preparing private egress")
+        if instance.metadata["network_profile"] != "offline":
+            raise QSXError("network-cut is required before preparing another explicit grant")
+        backend = LibvirtBackend()
+        if backend.is_active(instance.name):
+            raise QSXError("stop the instance before preparing its egress configuration medium")
+        check_domain(backend._domain(instance.name, inactive=True))
+        pending = instance.metadata.get("egress_pending")
+        if pending and pending.get("revoked"):
+            backend.detach_medium(instance.name, instance.directory / pending["medium"], missing_ok=True)
+            instance.metadata.setdefault("egress_preparation_history", []).append(pending)
+            pending = None
+        digest = policy_digest(admitted)
+        if pending:
+            if pending.get("policy_sha256") != digest:
+                raise QSXError("pending egress policy differs; network-cut before new preparation")
+            medium = instance.directory / pending["medium"]
+            if sha256(medium) != pending["medium_sha256"]:
+                raise QSXError("private egress configuration medium changed")
+        else:
+            nonce = uuid.uuid4().hex
+            mac = "52:54:00:" + ":".join(nonce[n:n + 2] for n in (0, 2, 4))
+            medium = instance.directory / f"egress-{nonce}.iso"
+            marker_hash = make_seed(medium, instance.metadata["instance_id"], nonce, mac)
+            pending = {
+                "policy": admitted, "policy_sha256": digest,
+                "policy_source": str(policy.resolve()), "nonce": nonce, "mac": mac,
+                "medium": medium.name, "medium_sha256": sha256(medium),
+                "marker_sha256": marker_hash, "revoked": False,
+            }
+            instance.metadata["egress_pending"] = pending
+            _save(instance)
+        domain = backend._domain(instance.name, inactive=True)
+        matches = [disk for disk in domain.findall("./devices/disk")
+                   if (source := disk.find("source")) is not None
+                   and source.get("file") == str(medium)]
+        if not matches:
+            if any(disk.get("device") == "cdrom" for disk in domain.findall("./devices/disk")):
+                raise QSXError("detach other configuration media before private egress import")
+            backend.attach_readonly_medium(instance.name, medium)
+        elif (len(matches) != 1 or matches[0].get("device") != "cdrom"
+              or matches[0].find("readonly") is None):
+            raise QSXError("private egress medium is not a unique readonly CD-ROM")
+        (instance.directory / "domain.xml").write_text(backend.definition(instance.name))
+        return {"name": instance.name, "network_profile": "offline",
+                "status": "PRIVATE_CONFIGURATION_PREPARED", "medium": str(medium),
+                "next_step": "review service-account storage access, start offline, then network-grant"}
+
+
+def grant_network(path: Path | str, policy: Path) -> dict[str, Any]:
+    """Explicitly grant one verified deployment, after guest configuration import."""
+    from .runtime_egress import PROFILE, load_egress_policy, policy_digest, verify_network
+
+    with _locked(path) as instance:
+        admitted = load_egress_policy(policy, instance.metadata["instance_id"])
+        pending = instance.metadata.get("egress_pending")
+        if (instance.metadata["network_profile"] != "offline" or not pending
+                or pending.get("revoked")
+                or policy_digest(admitted) != pending["policy_sha256"]):
+            raise QSXError("network-grant requires a current matching network-prepare import")
+        backend = LibvirtBackend()
+        verify_network(backend, instance.name)
+        observation_path = instance.directory / f"egress-observation-{pending['nonce']}.json"
+        if pending.get("observation_sha256"):
+            if sha256(observation_path) != pending["observation_sha256"]:
+                raise QSXError("saved private egress import observation changed")
+        else:
+            marker = "/var/lib/qsx-egress-configuration.json"
+            script = (
+                'test "$(id -un)" = agent && test "$(id -u)" -ne 0 && '
+                f'test "$(sha256sum {marker} | cut -c 1-64)" = '
+                + shlex.quote(pending["marker_sha256"]) + f" && cat {marker}"
+            )
+            observation = backend.run_guest(instance.name, ["sh", "-c", script], WORKSPACE, timeout=30)
+            if observation["returncode"] != 0:
+                raise QSXError("private egress configuration is not ready; inspect offline boot")
+            atomic_json(observation_path, observation)
+            pending["observation_sha256"] = sha256(observation_path)
+            _save(instance)
+        if backend.is_active(instance.name):
+            backend.shutdown(instance.name)
+        medium = instance.directory / pending["medium"]
+        if sha256(medium) != pending["medium_sha256"]:
+            raise QSXError("private egress configuration medium changed")
+        backend.detach_medium(instance.name, medium, missing_ok=True)
+        observed = backend.attach_egress(instance.name, pending["mac"])
+        if instance.metadata.get("egress_grant"):
+            instance.metadata.setdefault("egress_grant_history", []).append(instance.metadata["egress_grant"])
+        instance.metadata["egress_grant"] = {
+            "policy_source": str(policy.resolve()), "policy_sha256": policy_digest(admitted),
+            "policy": admitted, "mac": pending["mac"], "boot_id": observed["boot_id"],
+            "deployment_sha256": observed["deployment_sha256"], "granted_at_unix": time.time(),
+        }
+        instance.metadata.setdefault("egress_preparation_history", []).append(pending)
+        del instance.metadata["egress_pending"]
+        instance.metadata.update(network_profile=PROFILE, network_cut_latched=False, phase="stopped")
+        (instance.directory / "domain.xml").write_text(backend.definition(instance.name))
+        atomic_json(instance.directory / "egress-grant-observation.json", observed)
+        _save(instance)
+        return {"name": instance.name, "network_profile": PROFILE, "state": "shut off",
+                "status": "EXPLICIT_GRANT_VERIFIED", "operator_login": "NOT_RUN"}

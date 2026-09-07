@@ -12,6 +12,7 @@ import tty
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree
 
 from .config import SAFE_NAME
@@ -59,16 +60,43 @@ class LibvirtBackend:
             raise QSXError(f"domain already exists: {expected}; refusing to overwrite it")
         self._virsh("define", str(xml))
 
-    def start(self, name: str) -> None:
+    def start(self, name: str, egress: dict[str, Any] | None = None) -> None:
         if not Path("/dev/kvm").exists():
             raise QSXError("KVM unavailable; production backend does not fall back to TCG")
+        from .runtime_egress import check_domain, verify_network
+
         root = self._domain(name, inactive=True)
-        if root.findall("./devices/interface") or root.findall("./devices/hostdev"):
-            raise QSXError(
-                "offline startup refuses network interfaces and host devices; "
-                "run network cut and review the domain definition"
-            )
+        if egress is None:
+            check_domain(root)
+        else:
+            check_domain(root, str(egress["mac"]))
+            observed = verify_network(self, name)
+            for key in ("boot_id", "deployment_sha256"):
+                if observed[key] != egress.get(key):
+                    raise QSXError("egress deployment or host boot changed; a fresh explicit grant is required")
         self._virsh("start", name)
+
+    def attach_egress(self, name: str, mac: str) -> dict[str, Any]:
+        from .runtime_egress import check_domain, interface_xml, verify_network
+
+        if self.is_active(name):
+            raise QSXError("egress interface can only be granted while the domain is SHUTOFF")
+        observed = verify_network(self, name)
+        root = self._domain(name, inactive=True)
+        if root.findall("./devices/interface"):
+            # Resume only the exact interface left by an interrupted grant.
+            check_domain(root, mac)
+        else:
+            check_domain(root)
+            with tempfile.TemporaryDirectory(prefix="qsx-egress-interface-") as temporary:
+                device = Path(temporary) / "interface.xml"
+                device.write_text(interface_xml(mac))
+                self._virsh("attach-device", name, str(device), "--config")
+            check_domain(self._domain(name, inactive=True), mac)
+        return observed
+
+    def definition(self, name: str) -> str:
+        return ElementTree.tostring(self._domain(name, inactive=True), encoding="unicode")
 
     def status(self, name: str) -> str:
         return self._virsh("domstate", name).strip()
@@ -226,9 +254,12 @@ class LibvirtBackend:
         disabled = 0
         if active:
             root = self._domain(name)
-            if root.findall("./devices/hostdev"):
+            if (root.findall("./devices/hostdev") or root.findall(
+                "./{http://libvirt.org/schemas/domain/qemu/1.0}commandline"
+            )):
                 raise QSXError(
-                    "unmanaged host device may provide network access; cannot certify cut"
+                    "unmanaged host device or QEMU commandline may provide network access; "
+                    "cannot certify cut"
                 )
             for interface in root.findall("./devices/interface"):
                 address = interface.find("mac")
@@ -247,8 +278,10 @@ class LibvirtBackend:
                 if link is None or link.get("state") != "down":
                     raise QSXError("network cut verification failed for a live interface")
         persistent = self._domain(name, inactive=True)
-        if persistent.findall("./devices/hostdev"):
-            raise QSXError("unmanaged host device may provide network access after restart")
+        if (persistent.findall("./devices/hostdev") or persistent.findall(
+            "./{http://libvirt.org/schemas/domain/qemu/1.0}commandline"
+        )):
+            raise QSXError("unmanaged host device or QEMU commandline may provide network after restart")
         interfaces = persistent.findall("./devices/interface")
         for interface in interfaces:
             with tempfile.TemporaryDirectory(prefix="qsx-detach-") as temporary:

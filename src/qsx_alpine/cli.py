@@ -87,6 +87,10 @@ def parser() -> argparse.ArgumentParser:
     for name in ("start", "status", "stop", "console", "finalize-import", "network-cut"):
         command = commands.add_parser(name)
         command.add_argument("instance", type=Path)
+    for name in ("network-prepare", "network-grant"):
+        command = commands.add_parser(name, help="explicit private instance egress configuration")
+        command.add_argument("instance", type=Path)
+        command.add_argument("--policy", type=Path, required=True)
     guest = commands.add_parser(
         "run", help="run argv as the nonroot agent through local serial",
         epilog="Put the guest command after --: run INSTANCE --timeout 60 -- python3 task.py",
@@ -141,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
                 result = runtime.stop_instance(args.instance)
             elif args.command == "finalize-import":
                 result = runtime.finalize_import(args.instance)
+            elif args.command == "network-prepare":
+                result = runtime.prepare_network(args.instance, args.policy)
+            elif args.command == "network-grant":
+                result = runtime.grant_network(args.instance, args.policy)
             elif args.command == "network-cut":
                 result = runtime.network_cut(args.instance)
             elif args.command == "console":
