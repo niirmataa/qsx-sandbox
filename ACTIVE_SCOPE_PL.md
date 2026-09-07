@@ -17,7 +17,8 @@ Rdzeń QSX pozostaje na `archive/qsx-core-pr1-3eb4908`, commit
 
 Cel: małe warsztaty Alpine x86_64, odtwarzalne wejścia, dowolne receptury zadań
 i osobne profile agentów, prywatne instancje oraz lokalna konsola.
-Host docelowy: Debian 13 z QEMU/KVM i libvirt. Uprawnienia i zasoby ogranicza
+Hosty dopuszczone: Ubuntu 24.04 LTS i Debian 13 z QEMU/KVM i libvirt.
+Bieżący odbiór lokalny odbywa się na Ubuntu 24.04 LTS. Uprawnienia i zasoby ogranicza
 osobna polityka operatora. Domyślna sieć jest odcięta.
 
 Praca w Work dostarcza kod, podpisane wejścia, testy dostępne w runnerze oraz
@@ -42,3 +43,10 @@ w Dockerze wewnątrz VM Alpine. Ten wariant nie jest jeszcze zaimplementowany.
 Priorytetem jest działający, odtwarzalny warsztat z właściwymi narzędziami.
 Rozmiar obrazu jest pomiarem zależnym od zadania, a nie powodem rezygnacji
 z potrzebnego SageMath, Lean lub ich zależności.
+
+## Lokalna kontynuacja
+
+Aktywne instrukcje operatora znajdują się w `AGENTS.md`. Dokładną kopię
+starszych instrukcji Codex Cloud zachowano w
+`docs/history/AGENTS_CODEX_CLOUD.md`; jest materiałem historycznym, nie
+zakresem ani polityką bieżącego lokalnego wykonania.
