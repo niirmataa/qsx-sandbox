@@ -6,7 +6,7 @@ agent_profile = "../agent-profiles/codex.toml"
 packages = ["docker", "docker-openrc", "python3", "zstd", "tar", "coreutils"]
 prepare = ["/usr/local/libexec/qsx-science-prepare"]
 readiness = [
-  "sage -python -c 'import os; from sage.all import ZZ, GF, matrix; assert os.geteuid() != 0; assert matrix(ZZ, [[2,3],[5,7]]).det() == -1; assert GF(7)(3)**6 == 1; print(\"SAGE_EXACT_PASS\")'",
+  "sage -python -c 'import os, sys; from sage.all import ZZ, GF, matrix; assert os.geteuid() == int(sys.argv[1]) != 0; assert os.getegid() == int(sys.argv[2]) != 0; assert 1000 in os.getgroups(); assert matrix(ZZ, [[2,3],[5,7]]).det() == -1; assert GF(7)(3)**6 == 1; print(\"SAGE_EXACT_PASS\")' \"$(id -u)\" \"$(id -g)\"",
   "/usr/local/libexec/qsx-science-check",
 ]
 
@@ -116,10 +116,12 @@ def command(request, uid, gid):
         raise ValueError("cwd must belong to the guest workspace")
     if uid == 0 or gid == 0:
         raise ValueError("root tool identity forbidden")
+    # The pinned publisher stores Sage beneath /home/sage (0750, GID 1000).
+    # Supplement only the container's groups; keep workspace files owned by agent.
     return ["/usr/bin/docker", "run", "--rm", "--pull=never", "--network=none",
             "--name=qsx-science-job", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
             "--pids-limit=256", "--memory=3g", "--memory-swap=3g", "--cpus=4",
-            "--user=" + str(uid) + ":" + str(gid), "--workdir=" + str(cwd),
+            "--user=" + str(uid) + ":" + str(gid), "--group-add=1000", "--workdir=" + str(cwd),
             "--mount=type=bind,source=/workspace/project,target=/workspace/project",
             "--mount=type=bind,source=/opt/lean-4.33.1,target=/opt/lean-4.33.1,readonly",
             "--tmpfs=/tmp:rw,nosuid,nodev,size=1g,mode=1777",
@@ -381,3 +383,45 @@ depend() {
 path = "/etc/docker/daemon.json"
 mode = "0644"
 content = '{"features":{"containerd-snapshotter":false},"storage-driver":"overlay2","bridge":"none","iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false,"hosts":["unix:///var/run/docker.sock"]}'
+
+[[files]]
+path = "/etc/conf.d/docker"
+mode = "0644"
+content = '''#!/bin/sh
+# Only this guest recipe: OpenRC calls stop_post after a successful stop.
+DOCKER_OPTS=""
+stop_post() {
+    /usr/local/libexec/qsx-science-seal.py
+}
+'''
+
+[[files]]
+path = "/usr/local/libexec/qsx-science-seal.py"
+mode = "0755"
+content = '''#!/usr/bin/env python3
+"""Called by Docker's OpenRC stop_post, never while the daemon is running."""
+import os
+from pathlib import Path
+
+INSTANCE_ID = Path("/var/lib/qsx-instance-id")
+ENGINE_ID = Path("/var/lib/docker/engine-id")
+
+
+def clear_template_identity():
+    # The import seed writes this root-owned marker before a private instance
+    # is finalized. Preserve that instance's engine identity on every restart.
+    # lstat also treats a broken symlink as a marker, never as an empty template.
+    try:
+        INSTANCE_ID.lstat()
+    except FileNotFoundError:
+        ENGINE_ID.unlink(missing_ok=True)
+        return True
+    return False
+
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        raise SystemExit("template sealing requires guest root")
+    if clear_template_identity():
+        print("QSX_SCIENCE_TEMPLATE_IDENTITY_CLEARED", flush=True)
+'''

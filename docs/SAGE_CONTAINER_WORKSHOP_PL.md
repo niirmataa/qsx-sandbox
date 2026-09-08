@@ -124,7 +124,13 @@ Niewielka usługa root nasłuchuje wyłącznie w gościu na AF_UNIX pod
 `/workspace/project`. Nie przyjmuje flag Dockera, obrazu, UID, konfiguracji
 sieci ani ścieżek montowań. Kod i socket są kontrolowane przez root.
 
-Kontener ma UID/GID `agent`, tylko dwa stałe bindy z dysku gościa: workspace
+Kontener zachowuje UID/GID `agent` i otrzymuje jedną dodatkową grupę 1000
+wyłącznie wewnątrz kontenera. Przypięty obraz wydawcy umieszcza Sage pod
+`/home/sage` z trybem 0750 i UID/GID 1000; agent Alpine może mieć UID/GID 1001.
+To pozwala czytać narzędzia bez zmiany właściciela wyników w workspace,
+grup konta gościa lub hosta. Readiness porównuje UID/GID uruchomionego Sage
+z rzeczywistym kontem agenta i sprawdza dodatkową grupę.
+Kontener ma tylko dwa stałe bindy z dysku gościa: workspace
 oraz Lean tylko do odczytu. Rootfs jest tylko do odczytu, `/tmp` jest tmpfs,
 sieć ma `none`, wszystkie capabilities są usunięte i włączone jest
 `no-new-privileges`. Obowiązuje limit 3 GiB pamięci, 4 CPU i 256 procesów,
@@ -139,11 +145,21 @@ i `lake`; konsola QSX nadal jest zwykłą konsolą Alpine. Tryb REPL Sage ze
 strumieniowym stdin nie jest obecnie implementowany. Nie zmieniono sandboxu
 Codexa, aby dopuścić narzędzia; jego dostęp musi przejść rzeczywisty test.
 
+Tożsamość silnika Dockera jest usuwana z budowanego wzorca przez
+`/usr/local/libexec/qsx-science-seal.py`, wywoływany z `stop_post` w konfiguracji
+OpenRC Dockera. [Kolejność OpenRC](https://github.com/OpenRC/openrc/blob/master/sh/openrc-run.sh.in)
+wywołuje ten hook po pomyślnym zatrzymaniu usługi. Helper usuwa wyłącznie
+`/var/lib/docker/engine-id` i tylko gdy nie istnieje `/var/lib/qsx-instance-id`.
+Znacznik importu prywatnej instancji, także pusty lub symlink, powstrzymuje
+usuwanie. Warstwy i identyfikator przypiętego obrazu pozostają zachowane.
+Normalne restarty prywatnej instancji zachowują jej własną tożsamość silnika.
+
 ## Odbiór i dowody
 
 Readiness wykonywane jako nie-root `agent` sprawdza:
 
 - dokładny wyznacznik macierzy nad ZZ oraz potęgowanie w GF(7);
+- zgodność UID/GID Sage z kontem agenta i dodatkową grupę 1000 kontenera;
 - kompilację `example (n : Nat) : n + 0 = n := rfl` do niepustego `.olean`;
 - utworzenie projektu Lake, `lake build` i uruchomienie otrzymanego programu;
 - to samo narzędzie Sage wywołane przez przypięty sandbox Codexa, z dokładną
@@ -154,12 +170,26 @@ sandboxu nie wymaga modelu ani loginu; osobiste logowanie i rzeczywiste
 zadanie modelu są osobnym odbiorem. Wzorzec nie ma danych projektu ani
 poświadczeń. Testy syntetyczne usuwają własny katalog w workspace.
 
-W aktualnej sesji własne testy w `tests/test_sage_container.py` dały 13 PASS
+Po rzeczywistym shutdown buildera sprawdź w `.boot.log` znacznik
+`QSX_SCIENCE_TEMPLATE_IDENTITY_CLEARED` i brak `/var/lib/docker/engine-id`
+na nieaktywnym wzorcu. Sam wcześniejszy `QSX_READY` nie sprawdza hooka
+wykonywanego podczas zamykania. W dwóch prywatnych instancjach odczytaj
+`docker info --format '{{.ID}}'` przez administracyjną konsolę gościa,
+sprawdź różne wartości i ich zachowanie po restarcie. Tych czynności nie
+zastępuje test helpera na plikach syntetycznych.
+
+Historycznie własne testy w `tests/test_sage_container.py` dały 13 PASS
 (kontrakt argumentów, ucieczki ścieżek, zakaz root, graf OCI, składnia
 skryptów, odnowienie tokenu i wznawianie transferu); Ruff helpera i testów PASS.
-Freeze wejść zakończył się PASS. Budowa, boot KVM i runtime narzędzi pozostają
-`NOT_RUN`; operator wstrzymał nowe budowy do przekazania szablonu AGENTS dla VM.
+Freeze wejść zakończył się PASS. Na tamtym etapie budowa, boot KVM i runtime
+narzędzi miały `NOT_RUN`; operator wstrzymał nowe budowy do przekazania szablonu
+AGENTS dla VM. Aktualna instrukcja operatora zleca ich kontynuację.
 Prebuild review wykazało, że `/home/sage` w przypiętym obrazie ma 0750,
-UID/GID 1000. Zanim ruszy budowa, trzeba jawnie umożliwić UID Alpine agent
-odczyt tego katalogu, zachowując nie-root i read-only rootfs. Nie traktuj tej
-notatki jako raportu udanego builda.
+UID/GID 1000. Późniejsza poprawka receptury dodaje opisaną wyżej grupę tylko
+w kontenerze i hook usunięcia tożsamości silnika wzorca. Nowe regresje obejmują
+UID/GID 1001 wszystkich trzech narzędzi, usunięcie wyłącznie engine-id ze wzorca,
+zachowanie tożsamości instancji, symlinki i zgłoszenie błędu usunięcia.
+Przed poprawką trzy przypadki UID/GID 1001 nie przechodziły; po poprawce cały
+plik ma 22 PASS. Po zmianie receptury potrzebny jest nowy lock; przypięte
+wejścia pozostają te same. Nie traktuj tej notatki ani testów hostowych jako
+raportu udanego builda.

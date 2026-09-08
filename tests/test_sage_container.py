@@ -51,6 +51,73 @@ def test_guest_tool_commands_preserve_boundary(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize("tool", ["sage", "lean", "lake"])
+def test_guest_tool_keeps_agent_owner_and_can_read_publisher_home(
+    tmp_path: Path, tool: str,
+) -> None:
+    module = service(tmp_path)
+    # Alpine's agent need not have the image publisher's UID/GID 1000.
+    argv = module.command({"tool": tool, "argv": [], "cwd": str(module.WORKSPACE)},
+                          1001, 1001)
+    assert "--user=1001:1001" in argv
+    assert [arg for arg in argv if arg.startswith("--group-add=")] == ["--group-add=1000"]
+    assert "--read-only" in argv
+    assert not any("docker.sock" in arg for arg in argv)
+
+
+def seal_module(tmp_path: Path) -> types.ModuleType:
+    path = tmp_path / "guest_seal.py"
+    path.write_text(guest_source("qsx-science-seal.py"))
+    spec = importlib.util.spec_from_file_location("qsx_science_seal_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.INSTANCE_ID = tmp_path / "qsx-instance-id"
+    module.ENGINE_ID = tmp_path / "engine-id"
+    return module
+
+
+def test_template_sealing_removes_only_engine_identity(tmp_path: Path) -> None:
+    module = seal_module(tmp_path)
+    module.ENGINE_ID.write_text("synthetic-builder-identity")
+    image_data = tmp_path / "image-layer"
+    image_data.write_bytes(b"synthetic pinned image data")
+    assert module.clear_template_identity() is True
+    assert not module.ENGINE_ID.exists()
+    assert image_data.read_bytes() == b"synthetic pinned image data"
+    assert module.clear_template_identity() is True
+
+
+@pytest.mark.parametrize("marker", ["instance", "empty", "broken_symlink"])
+def test_private_instance_keeps_engine_identity(tmp_path: Path, marker: str) -> None:
+    module = seal_module(tmp_path)
+    module.ENGINE_ID.write_text("synthetic-private-identity")
+    if marker == "broken_symlink":
+        module.INSTANCE_ID.symlink_to(tmp_path / "absent")
+    else:
+        module.INSTANCE_ID.write_text("qsx-synthetic-instance" if marker == "instance" else "")
+    for _ in range(2):
+        assert module.clear_template_identity() is False
+        assert module.ENGINE_ID.read_text() == "synthetic-private-identity"
+
+
+def test_template_sealing_does_not_follow_engine_symlink(tmp_path: Path) -> None:
+    module = seal_module(tmp_path)
+    target = tmp_path / "unrelated-data"
+    target.write_text("retain")
+    module.ENGINE_ID.symlink_to(target)
+    assert module.clear_template_identity() is True
+    assert not module.ENGINE_ID.is_symlink()
+    assert target.read_text() == "retain"
+
+
+def test_template_sealing_reports_failed_removal(tmp_path: Path) -> None:
+    module = seal_module(tmp_path)
+    module.ENGINE_ID.mkdir()
+    with pytest.raises(IsADirectoryError):
+        module.clear_template_identity()
+
+
 @pytest.mark.parametrize("change", [
     {"tool": "sh"}, {"argv": "--privileged"}, {"argv": ["nul\0argument"]},
     {"cwd": "/"}, {"cwd": "relative"}, {"docker_args": ["--privileged"]},
