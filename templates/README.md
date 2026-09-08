@@ -124,7 +124,23 @@ Sigstore online należy do freeze, a jej materiały dowodowe są zachowane w loc
 Cache obrazu uwzględnia lock, helpery, wersje i hashe narzędzi oraz akcelerator.
 Ponowne użycie wymaga poprawnego hasha obrazu i logu, znacznika rzeczywistej
 gotowości i `qemu-img check`. Gotowy obraz jest samodzielnym QCOW2 bez backing
-file. Zachowaj razem QCOW2, `.manifest.json` oraz `.boot.log`.
+file ani zewnętrznego pliku danych. Przed uruchomieniem parsera QEMU kontroler
+sprawdza ograniczony nagłówek i rozszerzenia QCOW2, odrzucając takie zależności;
+następnie wymusza format i wykonuje `qemu-img check`. Obsługiwane pozostają
+samodzielne obrazy v2/v3, także ze skompresowanymi danymi zlib lub zstd.
+Wybrane obrazy muszą pozostawać niezmienione w storage kontrolowanym przez
+operatora podczas weryfikacji i użycia. Zachowaj razem QCOW2, `.manifest.json`
+oraz `.boot.log`.
+
+Konsola buildera ma osobny hostowy budżet: domyślnie 64 MiB, jawnie ustawiany
+przez operatora jako `image-build --log-limit-mib 128`. Przekroczenie limitu
+kończy build błędem, zatrzymuje jego proces i zachowuje prefiks logu mieszczący
+się w limicie. Nie jest zaliczoną budową z obciętym logiem. Zbyt duży log cache
+również blokuje ponowną publikację przy wybranym limicie. Wyszukiwanie znacznika
+gotowości i `image-verify` czytają log strumieniowo; manifest zachowuje jego hash
+oraz budżet zastosowany podczas pierwotnego builda. Budżet nie zmienia limitów
+RAM, CPU, dysku ani sieci gościa. Zmiana kodu walidatora/kolektora wymaga nowego
+locka; poprzednie locki i dowody pozostają zachowane.
 
 Manifest rozdziela czas budowy/startu, rozmiar wirtualny, długość pliku oraz
 bloki zajęte na dysku. `cache_hit` oznacza użycie gotowego zweryfikowanego obrazu,

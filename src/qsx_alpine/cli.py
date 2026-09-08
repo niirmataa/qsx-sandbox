@@ -74,6 +74,8 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--timeout", type=positive_seconds, default=1800,
                        help="maximum guest build time in seconds (default: 1800)")
     build.add_argument("--policy", type=Path)
+    build.add_argument("--log-limit-mib", type=int, default=64,
+                       help="host build-console budget in MiB; overflow fails the build (default: 64)")
     verify = commands.add_parser("image-verify")
     verify.add_argument("manifest", type=Path)
     instance = commands.add_parser("instance-create", help="create an independent private instance")
@@ -126,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             result = {"lock": str(lock)}
         elif args.command == "image-build":
             result = templates.build_image(args.lock, args.cache, args.output, args.accelerator,
-                                           timeout=args.timeout, policy=args.policy)
+                                           timeout=args.timeout, policy=args.policy,
+                                           max_log_bytes=args.log_limit_mib * 1024**2)
         elif args.command == "image-verify":
             result = templates.verify_image(args.manifest)
         else:

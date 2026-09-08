@@ -55,4 +55,19 @@ def test_long_source_build_timeout_is_forwarded_to_builder() -> None:
         assert main(["image-build", "lock.json", "--cache", "cache", "--output", "research.qcow2",
                      "--timeout", "43200", "--policy", "operator.toml"]) == 0
         build.assert_called_once_with(Path("lock.json"), Path("cache"), Path("research.qcow2"),
-                                      "kvm", timeout=43200, policy=Path("operator.toml"))
+                                      "kvm", timeout=43200, policy=Path("operator.toml"),
+                                      max_log_bytes=64 * 1024**2)
+
+
+def test_operator_can_select_build_log_budget() -> None:
+    with patch("qsx_alpine.templates.build_image", return_value={}) as build:
+        assert main(["image-build", "lock.json", "--cache", "cache", "--output", "image.qcow2",
+                     "--log-limit-mib", "128"]) == 0
+        assert build.call_args.kwargs["max_log_bytes"] == 128 * 1024**2
+
+
+def test_invalid_log_budget_fails_before_reading_inputs(tmp_path: Path) -> None:
+    output = tmp_path / "new.qcow2"
+    assert main(["image-build", str(tmp_path / "missing-lock.json"), "--cache", str(tmp_path),
+                 "--output", str(output), "--log-limit-mib", "0"]) == 2
+    assert not output.exists()

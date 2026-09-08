@@ -15,7 +15,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import tempfile
 import time
 import tomllib
@@ -27,6 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .build_output import DEFAULT_LOG_LIMIT_BYTES, log_contains, run_build
 from .errors import QSXError
 from .qcow import inspect_image
 from .util import atomic_json, run, sha256
@@ -402,7 +402,8 @@ def create_recipe(
 def _implementation() -> dict[str, str]:
     return {
         name: sha256(Path(__file__).with_name(name))
-        for name in ("templates.py", "apk_cache.py", "provenance.py", "util.py", "config.py", "qcow.py")
+        for name in ("templates.py", "apk_cache.py", "provenance.py", "util.py", "config.py",
+                     "qcow.py", "build_output.py")
     }
 
 
@@ -731,7 +732,7 @@ def verify_image(manifest_path: Path | str) -> dict[str, Any]:
     log = _inside(path.parent, manifest["boot_log"])
     if not log.is_file() or sha256(log) != manifest["boot_log_sha256"]:
         raise QSXError("boot evidence hash mismatch")
-    if manifest["readiness_marker"] not in log.read_text(errors="replace"):
+    if not log_contains(log, manifest["readiness_marker"]):
         raise QSXError("guest readiness evidence missing")
     _check_qcow(image)
     return manifest
@@ -790,6 +791,7 @@ def build_image(
     accelerator: str = "kvm",
     timeout: int = 1800,
     policy: Path | None = None,
+    max_log_bytes: int = DEFAULT_LOG_LIMIT_BYTES,
 ) -> dict[str, Any]:
     """Boot an offline build guest, require actual readiness, seal independent QCOW2.
 
@@ -803,6 +805,8 @@ def build_image(
         raise QSXError("accelerator must be kvm or explicit tcg")
     if type(timeout) is not int or timeout <= 0:
         raise QSXError("build timeout must be a positive integer")
+    if type(max_log_bytes) is not int or max_log_bytes <= 0:
+        raise QSXError("build log limit must be a positive integer")
     cache, output = Path(cache).resolve(), Path(output).resolve()
     data = _read_json(Path(lock))
     _verify_lock(data, cache)
@@ -830,6 +834,8 @@ def build_image(
         started = time.monotonic()
         if cached_manifest.exists():
             manifest = verify_image(cached_manifest)
+            if (cached / manifest["boot_log"]).stat().st_size > max_log_bytes:
+                raise QSXError("cached build log exceeds the selected host log limit")
             return _publish_image(
                 cached_image, cached / manifest["boot_log"], output, manifest, True
             )
@@ -877,24 +883,11 @@ def build_image(
                 f"file={str(medium).replace(chr(44), chr(44) * 2)},format=raw,media=cdrom,readonly=on",
             ]
             boot_started = time.monotonic()
-            try:
-                with boot_log.open("wb") as stream:
-                    process_result = subprocess.run(
-                        qemu,
-                        stdin=subprocess.DEVNULL,
-                        stdout=stream,
-                        stderr=subprocess.STDOUT,
-                        timeout=timeout,
-                        check=False,
-                    )
-            except subprocess.TimeoutExpired as exc:
-                raise QSXError(f"build guest timed out; evidence retained at {boot_log}") from exc
-            except OSError as exc:
-                raise QSXError(f"cannot start build guest: {exc}") from exc
+            returncode = run_build(qemu, boot_log, timeout, max_log_bytes)
             boot_seconds = time.monotonic() - boot_started
-            if process_result.returncode != 0 or marker not in boot_log.read_text(errors="replace"):
+            if returncode != 0 or not log_contains(boot_log, marker):
                 raise QSXError(
-                    f"build guest failed readiness (exit {process_result.returncode}); evidence: {boot_log}"
+                    f"build guest failed readiness (exit {returncode}); evidence: {boot_log}"
                 )
             _check_qcow(disk)
             run(
@@ -942,6 +935,7 @@ def build_image(
                 "boot_log_sha256": sha256(boot_log),
                 "readiness_marker": marker,
                 "boot_seconds": round(boot_seconds, 3),
+                "build_log_limit_bytes": max_log_bytes,
                 "build_seconds": round(time.monotonic() - started, 3),
                 "cache_hit": False,
                 "evidence": "actual_guest_readiness_and_clean_shutdown",
