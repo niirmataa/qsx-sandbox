@@ -6,7 +6,6 @@ import fcntl
 import hashlib
 import json
 import os
-import posixpath
 import shlex
 import stat
 import tarfile
@@ -14,10 +13,10 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 from .backend import LibvirtBackend, domain_xml
 from .config import SAFE_NAME, load_policy, resolve_resources
@@ -95,66 +94,172 @@ def _excluded(relative: Path) -> bool:
     return any(part in EXCLUDED_NAMES or part.startswith(".env.") for part in relative.parts)
 
 
-def _source_entries(source: Path) -> list[dict[str, Any]]:
+def _source_state(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+@contextmanager
+def _source_open(name: Path | str, parent: int | None, flags: int) -> Iterator[int]:
+    descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _source_root(source: Path) -> Iterator[int]:
+    # Pin the selected directory when snapshotting starts. Even its ancestors
+    # must not be re-resolved through links between validation and opening.
+    with ExitStack() as stack:
+        descriptor = stack.enter_context(_source_open("/", None, os.O_PATH | os.O_DIRECTORY))
+        for component in source.absolute().parts[1:]:
+            descriptor = stack.enter_context(
+                _source_open(component, descriptor, os.O_PATH | os.O_DIRECTORY)
+            )
+        # Ancestors need search permission only; the selected directory is listed.
+        yield stack.enter_context(_source_open(".", descriptor, os.O_RDONLY | os.O_DIRECTORY))
+
+
+def _source_entries(source: int) -> tuple[list[dict[str, Any]], dict[str, tuple[int, ...]]]:
     entries: list[dict[str, Any]] = []
-    for root, directories, files in os.walk(source, followlinks=False):
-        parent = Path(root)
-        directories[:] = sorted(
-            name for name in directories if not _excluded((parent / name).relative_to(source))
-        )
-        for name in sorted([*directories, *files]):
-            path = parent / name
-            relative = path.relative_to(source)
+    states: dict[str, tuple[int, ...]] = {}
+
+    def visit(directory: int, parent: Path) -> None:
+        initial = _source_state(os.fstat(directory))
+        states[parent.as_posix()] = initial
+        for name in sorted(os.listdir(directory)):
+            relative = parent / name
             if _excluded(relative):
                 continue
-            info = path.lstat()
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            expected = _source_state(info)
             entry: dict[str, Any] = {"path": relative.as_posix(), "mode": info.st_mode & 0o777}
             if stat.S_ISLNK(info.st_mode):
-                target = os.readlink(path)
-                resolved = posixpath.normpath(posixpath.join(relative.parent.as_posix(), target))
-                if target.startswith("/") or resolved == ".." or resolved.startswith("../"):
-                    raise QSXError(f"source symlink escapes or is absolute: {relative}")
-                entry.update(type="symlink", target=target)
+                entry.update(type="symlink", target=os.readlink(name, dir_fd=directory))
             elif stat.S_ISDIR(info.st_mode):
+                with _source_open(name, directory, os.O_RDONLY | os.O_DIRECTORY) as child:
+                    if _source_state(os.fstat(child)) != expected:
+                        raise QSXError("source changed during snapshot")
+                    visit(child, relative)
                 entry.update(type="directory")
             elif stat.S_ISREG(info.st_mode):
-                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(descriptor, "rb") as stream:
-                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                        raise QSXError(f"source changed object type: {relative}")
+                with _source_open(name, directory, os.O_RDONLY) as descriptor, os.fdopen(
+                    descriptor, "rb", closefd=False
+                ) as stream:
+                    if _source_state(os.fstat(descriptor)) != expected:
+                        raise QSXError("source changed during snapshot")
                     digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                    if _source_state(os.fstat(descriptor)) != expected:
+                        raise QSXError("source changed during snapshot")
                 entry.update(type="file", size=info.st_size, sha256=digest)
             else:
                 raise QSXError(f"unsupported source filesystem object: {relative}")
+            if _source_state(os.stat(name, dir_fd=directory, follow_symlinks=False)) != expected:
+                raise QSXError("source changed during snapshot")
+            states[relative.as_posix()] = expected
             entries.append(entry)
-    return sorted(entries, key=lambda item: item["path"])
+        if _source_state(os.fstat(directory)) != initial:
+            raise QSXError("source changed during snapshot")
+
+    visit(source, Path())
+    return sorted(entries, key=lambda item: item["path"]), states
+
+
+def _source_links(entries: list[dict[str, Any]]) -> None:
+    links = {entry["path"]: entry["target"] for entry in entries if entry["type"] == "symlink"}
+    for name, target in links.items():
+        resolved = list(Path(name).parent.parts)
+        pending = target.split("/")
+        followed = 0
+        while pending:
+            component = pending.pop(0)
+            if target.startswith("/") or (component == ".." and not resolved):
+                raise QSXError(f"source symlink escapes or is absolute: {name}")
+            if component == "..":
+                resolved.pop()
+            elif component not in ("", "."):
+                resolved.append(component)
+                link = "/".join(resolved)
+                if link in links:
+                    followed += 1
+                    if followed > 40:
+                        raise QSXError(f"source symlink cycle or excessive chain: {name}")
+                    target = links[link]
+                    resolved.pop()
+                    pending = target.split("/") + pending
+
+
+class _ArchiveReader:
+    """tarfile consumes read(); hash those exact bytes, without buffering a file."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.stream.read(size)
+        self.digest.update(data)
+        self.size += len(data)
+        return data
+
+
+def _archive_source_file(
+    source: int, entry: dict[str, Any], states: dict[str, tuple[int, ...]],
+    output: tarfile.TarFile, member: tarfile.TarInfo,
+) -> None:
+    with ExitStack() as stack:
+        directory = source
+        relative = Path()
+        for component in Path(entry["path"]).parts[:-1]:
+            relative /= component
+            directory = stack.enter_context(
+                _source_open(component, directory, os.O_RDONLY | os.O_DIRECTORY)
+            )
+            if _source_state(os.fstat(directory)) != states[relative.as_posix()]:
+                raise QSXError("source changed during snapshot")
+        descriptor = stack.enter_context(
+            _source_open(Path(entry["path"]).name, directory, os.O_RDONLY)
+        )
+        expected = states[entry["path"]]
+        if _source_state(os.fstat(descriptor)) != expected:
+            raise QSXError("source changed during snapshot")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            reader = _ArchiveReader(stream)
+            member.size = entry["size"]
+            output.addfile(member, cast(BinaryIO, reader))
+            if (reader.size != entry["size"] or reader.digest.hexdigest() != entry["sha256"]
+                    or _source_state(os.fstat(descriptor)) != expected):
+                raise QSXError("source changed during snapshot")
 
 
 def _source_archive(source: Path | None, archive: Path) -> dict[str, Any]:
-    before = _source_entries(source) if source else []
-    with tarfile.open(archive, "w") as output:
-        for entry in before:
-            member = tarfile.TarInfo("project/" + entry["path"])
-            member.mode = entry["mode"]
-            member.uid = member.gid = 0
-            if entry["type"] == "directory":
-                member.type = tarfile.DIRTYPE
-                output.addfile(member)
-            elif entry["type"] == "symlink":
-                member.type = tarfile.SYMTYPE
-                member.linkname = entry["target"]
-                output.addfile(member)
-            else:
-                assert source is not None
-                descriptor = os.open(source / entry["path"], os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(descriptor, "rb") as stream:
-                    current = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(current.st_mode) or current.st_size != entry["size"]:
-                        raise QSXError("source changed during snapshot")
-                    member.size = current.st_size
-                    output.addfile(member, stream)
-    if source and _source_entries(source) != before:
-        raise QSXError("source changed during snapshot; retry while source writers are stopped")
+    try:
+        with ExitStack() as stack:
+            descriptor = stack.enter_context(_source_root(source)) if source is not None else None
+            before, states = _source_entries(descriptor) if descriptor is not None else ([], {})
+            _source_links(before)
+            with tarfile.open(archive, "w") as output:
+                for entry in before:
+                    member = tarfile.TarInfo("project/" + entry["path"])
+                    member.mode = entry["mode"]
+                    member.uid = member.gid = 0
+                    if entry["type"] == "directory":
+                        member.type = tarfile.DIRTYPE
+                        output.addfile(member)
+                    elif entry["type"] == "symlink":
+                        member.type = tarfile.SYMTYPE
+                        member.linkname = entry["target"]
+                        output.addfile(member)
+                    else:
+                        assert descriptor is not None
+                        _archive_source_file(descriptor, entry, states, output, member)
+            if descriptor is not None and _source_entries(descriptor) != (before, states):
+                raise QSXError("source changed during snapshot; retry while writers are stopped")
+    except OSError as exc:
+        raise QSXError(f"source snapshot failed: {exc}") from exc
     return {
         "scope": "working-tree data only; fresh guest Git baseline; source Git history excluded",
         "entries": before,
