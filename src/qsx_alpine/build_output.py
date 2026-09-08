@@ -74,6 +74,8 @@ def run_build(
                         break
                     available = max_log_bytes - written
                     stream.write(chunk[:available])
+                    # Publish even small chunks while the guest is still running.
+                    stream.flush()
                     written += min(len(chunk), available)
                     if len(chunk) > available:
                         raise QSXError(

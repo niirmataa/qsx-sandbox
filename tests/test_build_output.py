@@ -6,6 +6,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -61,6 +62,63 @@ def test_collects_exact_stdout_stderr_and_exit_code(
     assert run_build(command, log, timeout=5, max_log_bytes=10) == exit_code
     assert log.read_bytes() == b"out\xff\nerr\x80\n"
     assert_reaped(children[0])
+
+
+def test_small_output_is_visible_before_child_is_released(
+    tmp_path: Path, children: list[subprocess.Popen[bytes]]
+) -> None:
+    log = tmp_path / "live.log"
+    emitted = tmp_path / "emitted"
+    release = tmp_path / "release"
+    seen_live = threading.Event()
+    collection_done = threading.Event()
+
+    def read_live_log() -> None:
+        try:
+            deadline = time.monotonic() + 5
+            while not emitted.exists():
+                if time.monotonic() >= deadline or collection_done.wait(0.01):
+                    return
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not collection_done.is_set():
+                if log.read_bytes() == b"small live marker\n" and children[0].poll() is None:
+                    seen_live.set()
+                    return
+                collection_done.wait(0.01)
+        finally:
+            release.touch()
+
+    reader = threading.Thread(target=read_live_log)
+    reader.start()
+    try:
+        result = run_build(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, sys, time\n"
+                    "from pathlib import Path\n"
+                    "os.write(1, b'small live marker\\n')\n"
+                    "Path(sys.argv[1]).touch()\n"
+                    "while not Path(sys.argv[2]).exists():\n"
+                    "    time.sleep(0.01)\n"
+                ),
+                str(emitted),
+                str(release),
+            ],
+            log,
+            timeout=15,
+            max_log_bytes=1024,
+        )
+    finally:
+        collection_done.set()
+        release.touch()
+        reader.join(timeout=2)
+    assert not reader.is_alive()
+    assert result == 0
+    assert log.read_bytes() == b"small live marker\n"
+    assert_reaped(children[0])
+    assert seen_live.is_set(), "small output was not visible until the child was released"
 
 
 def test_output_overflow_retains_bounded_prefix_and_reaps_child(
