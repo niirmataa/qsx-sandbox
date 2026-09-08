@@ -21,7 +21,7 @@ from typing import Any, BinaryIO, cast
 from .backend import LibvirtBackend, domain_xml
 from .config import SAFE_NAME, load_policy, resolve_resources
 from .errors import QSXError
-from .templates import verify_image
+from .templates import _check_qcow, verify_image
 from .util import atomic_json, run, sha256
 
 WORKSPACE = "/workspace/project"
@@ -358,7 +358,7 @@ def create_instance(
         if root == source or root.is_relative_to(source) or source.is_relative_to(root):
             raise QSXError("source and instance storage boundaries must not overlap")
     base = image_manifest.parent / manifest["image"]
-    base_info = json.loads(run(["qemu-img", "info", "--output=json", str(base)]))
+    base_info = _check_qcow(base)
     if base_info.get("virtual-size", 0) > admitted["disk_gib"] * 1024**3:
         raise QSXError("instance disk would shrink the verified base image")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)

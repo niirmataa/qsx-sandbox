@@ -25,9 +25,10 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any
 
 from .errors import QSXError
+from .qcow import inspect_image
 from .util import atomic_json, run, sha256
 
 BASE = {
@@ -401,7 +402,7 @@ def create_recipe(
 def _implementation() -> dict[str, str]:
     return {
         name: sha256(Path(__file__).with_name(name))
-        for name in ("templates.py", "apk_cache.py", "provenance.py", "util.py", "config.py")
+        for name in ("templates.py", "apk_cache.py", "provenance.py", "util.py", "config.py", "qcow.py")
     }
 
 
@@ -700,11 +701,7 @@ def _make_seed(lock: dict[str, Any], cache: Path, directory: Path, marker: str) 
 
 
 def _check_qcow(path: Path) -> dict[str, Any]:
-    info = json.loads(run(["qemu-img", "info", "--output=json", str(path)]))
-    if info.get("format") != "qcow2" or info.get("backing-filename"):
-        raise QSXError("image must be a standalone QCOW2 without a backing file")
-    run(["qemu-img", "check", "-f", "qcow2", str(path)])
-    return cast(dict[str, Any], info)
+    return inspect_image(path)
 
 
 def verify_image(manifest_path: Path | str) -> dict[str, Any]:
