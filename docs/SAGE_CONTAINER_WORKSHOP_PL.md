@@ -1,9 +1,11 @@
 # SageMath + Lean 4 w kontenerze wewnątrz VM Alpine
 
-Status implementacji: `IMPLEMENTED_NOT_BUILT`. Osobna receptura
+Status odbioru z 2026-09-08: `FAIL` — rzeczywisty build wykonano; zatrzymał
+się na integracji lokalnego sandboxu Codexa z usługą narzędzi. Dokładne
+obliczenia Sage oraz kompilacja Lean i Lake przeszły w gościu jako nie-root.
+Nie powstał zaakceptowany obraz Sage z manifestem. Osobna receptura
 `templates/sage-lean4-container.toml` dostarcza SageMath 10.8 i Lean 4.33.1
-z Lake. Wynik działania w gościu trzeba potwierdzić rzeczywistym buildem;
-13 testów kontraktu, transferu i składni na hoście nie jest takim potwierdzeniem.
+z Lake; pełny wynik wymaga poprawki integracji i ponownego rzeczywistego builda.
 Natywna receptura `sage-lean4.toml` zachowuje status eksperymentalny.
 
 Dostępny host Ubuntu 24.04.4 ma około 15 GiB pamięci fizycznej i przy
@@ -193,3 +195,66 @@ Przed poprawką trzy przypadki UID/GID 1001 nie przechodziły; po poprawce cały
 plik ma 22 PASS. Po zmianie receptury potrzebny jest nowy lock; przypięte
 wejścia pozostają te same. Nie traktuj tej notatki ani testów hostowych jako
 raportu udanego builda.
+
+### Rzeczywista próba KVM na Ubuntu, 2026-09-08
+
+Host: Ubuntu 24.04.4 LTS, x86_64, kernel `6.8.0-139-generic`, Python 3.12.3.
+Próba używała zainstalowanego runtime z commitu
+`08c30182c1c08f51b15d4320a8fc86267077d107` oraz trzech ówczesnych zmian
+roboczych: tej dokumentacji, receptury i `tests/test_sage_container.py`.
+Ich dokładny zakres zachowano w `build-source.patch`; poprawki receptury
+zostały następnie zapisane w `ab19860d3b6bc3e047e08d1247bf98e7a14bd7e2`.
+SHA-256 użytej receptury:
+`d5f8846e31f65bb8a181a61a38fa5ba08155224c972443d7807eabdc3887f6ed`.
+Lock: `947bea03fcc23a33b86d52932ff8875e8b32dd341148ff0d579880e3d061bdb2`.
+
+Freeze zakończył się `PASS` w 131.55 s. Build trwał 3027.33 s, od
+`2026-09-08T06:03:41Z` do `2026-09-08T06:54:10Z`, i zakończył się kodem CLI 2.
+Konfiguracja: KVM, 4096 MiB RAM, 4 vCPU, dysk 32 GiB, timeout gościa 3600 s,
+budżet konsoli 64 MiB, domyślna niezmieniona polityka. Gość nie miał NIC;
+kontroler działał jako zwykły operator. Nie zmieniano usług, ACL ani sieci hosta.
+Łączny czas obejmuje przygotowanie ISO i cały przebieg; nie jest pomiarem
+samego startu. Zaobserwowane wysokie obciążenie I/O na dysku USB ograniczało
+przepustowość; przeniesienie na inny nośnik wymaga nowego pomiaru.
+
+| Sprawdzenie w rzeczywistym gościu | Status | Dowód i granica wyniku |
+|---|---|---|
+| Alpine uruchomione przez KVM, Docker i przypięte warstwy załadowane offline | `PASS` | Konsola rzeczywistej VM; to etap przygotowania, nie pełny odbiór wzorca. |
+| Sage: dokładna arytmetyka oraz zgodność UID/GID agenta | `PASS` | `SAGE_EXACT_PASS`. |
+| Lean: niepusty `Exact.olean`; Lake: budowa i wynik programu | `PASS` | `LEAN_PROOF_AND_LAKE_BUILD_PASS`, budowa Lake zakończyła 8 zadań. |
+| Wywołanie Sage przez sandbox Codexa 0.153.4 | `FAIL` | `connect()` do `/run/qsx-science/control.sock` zwróciło `EPERM`; brak `CODEX_SANDBOX_SAGE_PASS`. |
+| Gotowy obraz Sage, manifest i komplet readiness | `FAIL` | `QSX_BUILD_FAILED`; builder poprawnie odmówił publikacji. |
+| Usunięcie tożsamości Dockera ze wzorca i różne ID dwóch instancji | `NOT_RUN` | Wymaga udanego wzorca, kontroli po shutdown i dwóch prywatnych instancji. |
+| Zalogowane zadanie modelu | `NOT_RUN` | Transport, jego odbiór i osobiste logowanie pozostają osobnym etapem. |
+
+Lake zgłosił brak programu `git` podczas inicjalizacji repozytorium wewnątrz
+kontenera. Późniejszy `lake build` i uruchomienie programu powiodły się;
+ostrzeżenia nie należy usuwać z dowodów ani uznawać za działającą obsługę Git
+wewnątrz tego kontenera. Program Git zainstalowany w Alpine jest osobnym runtime.
+
+Po błędzie gość wykonał poweroff, a proces QEMU zakończył się kodem 0.
+Ten kod opisuje zakończenie emulatora; nie zmienia wyniku całej budowy `FAIL`.
+Nie ustalono jeszcze dokładnej przyczyny `EPERM` w warstwie sandboxu.
+Sam odnotowany błąd nie rozstrzyga, czy wynika z seccomp, przestrzeni nazw
+czy innego mechanizmu. Zmiana hosta na Debian nie jest sprawdzoną poprawką.
+Następny krok to mała reprodukcja w gościu i naprawa integracji przy zachowaniu
+polityki `workspace-write`, braku sieci narzędzi i kontroli dostępu brokera.
+
+Trwałe dowody leżą poza repo w katalogu roboczym operatora:
+
+- `qsx-local-sage-20260908-001/build-attempt.json`: dokładne argv, commit,
+  zmiany robocze, zasoby, czasy i wynik;
+- `qsx-local-sage-20260908-001/build-source.patch`: stan receptury przy starcie;
+- `qsx-local-sage-20260908-001/guest-console.log`: wynik narzędzi i błąd sandboxu;
+- `qsx-local-sage-20260908-001/image-build.log`: odmowa publikacji i ścieżka
+  zachowanego katalogu nieudanej budowy;
+- `qsx-local-sage-20260908-001/freeze-attempt.json`: pomiar freeze i jego zakres.
+
+Katalog bazowy na Ubuntu to
+`/home/god/Muzyka/QSX-ALPINE-SANBOX-v1`. Zachowany roboczy dysk nieudanej
+budowy nie jest wzorcem dostawy i nie ma zaakceptowanego manifestu.
+Późniejsze poprawki kolektora logów i przygotowania ISO nie były częścią
+runtime tej próby. Zmiana tych helperów wymaga nowego runtime i nowego locka;
+stary lock oraz dokładny runtime pozostają dowodem historycznym.
+Na polecenie operatora następne uruchomienia przechodzą na Debian 13 zgodnie
+z [instrukcją następnego etapu](DEBIAN_NEXT_STAGE_PL.md).
