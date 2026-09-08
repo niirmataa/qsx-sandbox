@@ -120,6 +120,9 @@ digestami i zachowanymi archiwami OCI/Docker do ładowania offline. QSX nadal
 ogranicza całą VM, a profil agenta pozostaje niezależny. Nie wolno przedstawiać
 takiego obrazu jako natywnej kompilacji Sage/Lean na musl.
 
-**Wariant Docker nie jest jeszcze zaimplementowany ani przetestowany.**
-Jest zaakceptowaną ścieżką lokalnej kontynuacji, nie działającą funkcją tej
-receptury. Jego większy rozmiar trzeba zmierzyć po rzeczywistej budowie.
+Osobna receptura `templates/sage-lean4-container.toml` i jawny helper freeze
+są teraz zaimplementowane. Aktualny stan odbioru, ograniczenia wrapperów,
+przypięte źródła i komendy znajdują się w
+[SAGE_CONTAINER_WORKSHOP_PL.md](SAGE_CONTAINER_WORKSHOP_PL.md).
+Niniejsza receptura natywna pozostaje `EXPERIMENTAL_NOT_BUILT`; wdrożenie
+wariantu kontenerowego nie jest dowodem jej kompilacji.
