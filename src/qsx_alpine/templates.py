@@ -656,21 +656,31 @@ def _guest_script(recipe: dict[str, Any], marker: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _seed_pathspec(target: str, source: Path) -> str:
+    """Quote a graft pathspec for xorriso's quoted list, with literal filenames."""
+    escaped = (value.replace("\\", "\\\\").replace("=", "\\=")
+               for value in (target, str(source)))
+    return shlex.quote("=".join(escaped))
+
+
 def _make_seed(lock: dict[str, Any], cache: Path, directory: Path, marker: str) -> Path:
     seed = directory / "seed"
     seed.mkdir()
     (seed / "packages").mkdir()
     (seed / "artifacts").mkdir()
+    pathspecs = [_seed_pathspec("/", seed)]
     for entry in lock.get("artifacts", []):
         if entry.get("kind") == "recipe-artifact":
             _validated_artifacts([{key: entry[key] for key in ("name", "url", "sha256")}])
-            shutil.copy2(_inside(cache, entry["path"]), seed / "artifacts" / entry["name"])
+            pathspecs.append(_seed_pathspec(
+                "/artifacts/" + entry["name"], _inside(cache, entry["path"])
+            ))
     apk_dir = _inside(cache, lock["apk_dir"])
     for entry in lock["packages"]:
         source = _inside(apk_dir, entry["path"])
-        shutil.copy2(source, seed / "packages" / source.name)
+        pathspecs.append(_seed_pathspec("/packages/" + source.name, source))
     if lock["codex_path"]:
-        shutil.copy2(_inside(cache, lock["codex_path"]), seed / "codex.tar.gz")
+        pathspecs.append(_seed_pathspec("/codex.tar.gz", _inside(cache, lock["codex_path"])))
     (seed / "build.sh").write_text(_guest_script(lock["recipe"], marker))
     (seed / "meta-data").write_text(
         "instance-id: qsx-build-" + uuid.uuid4().hex + "\nlocal-hostname: qsx-template\n"
@@ -682,10 +692,16 @@ def _make_seed(lock: dict[str, Any], cache: Path, directory: Path, marker: str) 
         "  - [mount, -o, ro, 'LABEL=cidata', /mnt/qsx-build]\n"
         "  - [sh, /mnt/qsx-build/build.sh]\n"
     )
+    # Read verified immutable inputs directly into the ISO. Keeping the list
+    # outside seed avoids including host paths in the guest medium. A quoted
+    # file handles newlines in paths and avoids argv limits for large APK sets.
+    path_list = directory / "seed.paths"
+    path_list.write_bytes(os.fsencode("\n".join(pathspecs) + "\n"))
     medium = directory / "seed.iso"
     run(
         [
             "xorriso",
+            "-no_rc",
             "-as",
             "mkisofs",
             "-quiet",
@@ -695,7 +711,9 @@ def _make_seed(lock: dict[str, Any], cache: Path, directory: Path, marker: str) 
             "cidata",
             "-o",
             str(medium),
-            str(seed),
+            "-graft-points",
+            "--quoted_path_list",
+            str(path_list),
         ]
     )
     return medium

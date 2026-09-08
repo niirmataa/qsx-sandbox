@@ -105,6 +105,13 @@ osobnego podpisu jego producenta należy opisać w recepturze, jeśli jest dost�
 Dłuższa budowa może wymagać jawnego `image-build --timeout 43200` oraz większych
 limitów w osobnej polityce operatora.
 
+Przy tworzeniu ISO `xorriso` czyta zweryfikowane wejścia bezpośrednio z cache,
+bez dodatkowej pełnej kopii i bez twardych dowiązań. Zachowany po błędzie
+katalog `seed` zawiera wygenerowane pliki konfiguracji; `seed.paths` obok niego
+zapisuje mapowanie wejść. Gotowy `seed.iso` jest niezależną kopią danych.
+Nie zmieniaj cache podczas weryfikacji i budowy. Zmiana tej części helpera
+wymaga nowego locka; wcześniejsze locki, cache i dowody pozostają zachowane.
+
 ## Cache i dowody
 
 Zachowaj **cały katalog cache**: bazę Alpine 3.24.1 BIOS/cloud-init, pakiet

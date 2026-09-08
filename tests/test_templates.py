@@ -523,6 +523,81 @@ def test_real_seed_keeps_additional_artifact_opaque(tmp_path: Path) -> None:
     assert extracted.read_bytes() == content
 
 
+@pytest.mark.skipif(shutil.which("xorriso") is None, reason="real ISO tool unavailable")
+@pytest.mark.parametrize("cache_name", [
+    "space and ż", "line\nnext", "single'and\"double", r"back\slash", "equal=sign",
+    "--return_with WARNING 0", "combined '\\\n= --help",
+])
+def test_real_seed_maps_literal_paths_without_cache_aliases(
+    tmp_path: Path, cache_name: str,
+) -> None:
+    content = b"same opaque source under two guest names"
+    digest = hashlib.sha256(content).hexdigest()
+    cache, work = tmp_path / cache_name, tmp_path / "work"
+    (cache / "blobs").mkdir(parents=True)
+    (cache / "apk/packages").mkdir(parents=True)
+    work.mkdir()
+    artifact = cache / "blobs" / (digest + ".artifact")
+    artifact.write_bytes(content)
+    package = cache / "apk/packages/a-very-long-synthetic-package-name-1.0-r0.apk"
+    package.write_bytes(b"opaque APK fixture")
+    codex = cache / "blobs/codex.tar.gz"
+    codex.write_bytes(b"opaque Codex fixture")
+    resolved = load_recipe(recipe(
+        tmp_path, artifact_toml("first.tar.gz", digest) + artifact_toml("second.tar.gz", digest)
+    ))
+    records = _freeze_artifacts(resolved, cache)
+    inputs = (artifact, package, codex)
+    for source in inputs:
+        source.chmod(0o444)
+    before = {source: source.stat() for source in inputs}
+    lock = {
+        "apk_dir": "apk", "packages": [{"path": "packages/" + package.name}],
+        "codex_path": "blobs/codex.tar.gz", "recipe": resolved, "artifacts": records,
+    }
+    medium = _make_seed(lock, cache, work, "LITERAL_MAPPED_SEED_NOT_BOOTED")
+    assert not list((work / "seed/artifacts").iterdir())
+    assert not list((work / "seed/packages").iterdir())
+    assert not (work / "seed/codex.tar.gz").exists()
+    assert (work / "seed.paths").is_file()
+    extracted = tmp_path / "extracted"
+    result = subprocess.run(
+        ["xorriso", "-no_rc", "-osirrox", "on", "-indev", str(medium),
+         "-extract", "/", str(extracted)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (extracted / "artifacts/first.tar.gz").read_bytes() == content
+    assert (extracted / "artifacts/second.tar.gz").read_bytes() == content
+    assert (extracted / "packages" / package.name).read_bytes() == package.read_bytes()
+    assert (extracted / "codex.tar.gz").read_bytes() == codex.read_bytes()
+    assert (extracted / "build.sh").read_bytes() == (work / "seed/build.sh").read_bytes()
+    assert not (extracted / "seed.paths").exists()
+    assert artifact.read_bytes() == content
+    for source in inputs:
+        after = source.stat()
+        for field in ("st_dev", "st_ino", "st_nlink", "st_mode", "st_uid", "st_gid",
+                      "st_size", "st_mtime_ns", "st_ctime_ns"):
+            assert getattr(after, field) == getattr(before[source], field)
+
+
+@pytest.mark.parametrize("relative", ["../outside", "/outside", "blobs/symlink"])
+def test_mapped_seed_keeps_cache_path_guards(tmp_path: Path, relative: str) -> None:
+    cache, work = tmp_path / "cache", tmp_path / "work"
+    (cache / "blobs").mkdir(parents=True)
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"must not enter seed")
+    (cache / "blobs/symlink").symlink_to(outside)
+    record = {
+        "kind": "recipe-artifact", "name": "tool.tar.gz", "path": relative,
+        "url": "https://example.test/tool.tar.gz", "sha256": "a" * 64,
+    }
+    with pytest.raises(QSXError, match="artifact path|escapes cache|symbolic link"):
+        _make_seed({"artifacts": [record]}, cache, work, "REJECTED_SEED")
+    assert not (work / "seed.iso").exists()
+
+
 @pytest.mark.parametrize("failure", [QSXError("failed readiness"), KeyboardInterrupt()])
 def test_failed_build_keeps_disk_seed_and_log_across_next_attempt(
     tmp_path: Path, failure: BaseException
